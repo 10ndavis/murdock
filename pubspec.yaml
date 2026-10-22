@@ -1,0 +1,24 @@
+name: murdock
+description: "See in the dark with your phone's speaker and mics: active sonar + an on-device echo-to-depth model."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.12.1
+  permission_handler: ^13.0.2
+  wakelock_plus: ^1.8.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/models/echo_student.tflite
