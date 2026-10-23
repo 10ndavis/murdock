@@ -13,7 +13,7 @@ import argparse
 import numpy as np
 
 from dataset import load_dir
-from murdock_model import build_student
+from murdock_model import build_student, load_student_weights
 
 
 def metrics(pred, true):
@@ -36,14 +36,13 @@ def main():
     ap.add_argument("--test", nargs="+", required=True)
     args = ap.parse_args()
 
-    _, d_train = zip(*[load_dir(d) for d in args.train])
-    d_train = np.concatenate(d_train)
-    e_test, d_test = zip(*[load_dir(d) for d in args.test])
-    e_test, d_test = np.concatenate(e_test), np.concatenate(d_test)
+    d_train = np.concatenate([load_dir(d)[2] for d in args.train])
+    test = [load_dir(d) for d in args.test]
+    e_test, p_test, d_test = (np.concatenate([t[i] for t in test]) for i in range(3))
 
     model, _, _ = build_student()
-    model.load_weights(args.weights)
-    pred = model.predict(e_test, batch_size=64, verbose=0)
+    load_student_weights(model, args.weights)
+    pred = model.predict([e_test, p_test], batch_size=64, verbose=0)
 
     mean_map = np.broadcast_to(d_train.mean(0), d_test.shape)
     const = np.full_like(d_test, d_train.mean())

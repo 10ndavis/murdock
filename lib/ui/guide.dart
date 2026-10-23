@@ -36,7 +36,8 @@ const _steps = [
           'and the speaker aims ahead.\n'
           '•  Arm partly out, about a foot from your chest.\n'
           '•  Hold it by the sides. Fingers off the top edge (speaker and mic).\n'
-          '•  Keep the same grip all the time; the AI learns your grip too.\n\n'
+          '•  Any comfortable angle works: the phone\'s angle is an input to the echo AI, so it learns each '
+          'angle you use. The GRIP strip says when you\'re at an angle it hasn\'t learned yet.\n\n'
           'The GRIP strip on screen checks all of this live and tells you what to fix.'),
   _Step(Icons.radar, 'STEP 1 · RADAR', 'Check your phone can hear',
       'Open RADAR. This is the raw sonar, with no AI involved.\n\n'

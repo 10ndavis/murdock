@@ -110,7 +110,9 @@ class SonarStatus {
         teacherBackend = m['teacherBackend'] as String? ?? '',
         teacherMs = m['teacherMs'] as int? ?? 0,
         stepsPerSec = (m['stepsPerSec'] as num?)?.toDouble() ?? 0,
-        finishing = m['finishing'] as bool? ?? false;
+        finishing = m['finishing'] as bool? ?? false,
+        tiltCoverage = (m['tiltCoverage'] as List<Object?>? ?? const []).cast<int>(),
+        coverageHere = m['coverageHere'] as int? ?? 0;
 
   final bool stereo;
   final String source;
@@ -132,6 +134,10 @@ class SonarStatus {
   /// Training speed over the last second, and whether FINISH LEARNING is running.
   final double stepsPerSec;
   final bool finishing;
+
+  /// Samples learned per phone-tilt bin (10° bins from -30°), and at the current tilt.
+  final List<int> tiltCoverage;
+  final int coverageHere;
 }
 
 class TeachResult {

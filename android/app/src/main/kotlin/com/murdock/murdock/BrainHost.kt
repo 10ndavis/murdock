@@ -31,6 +31,15 @@ object BrainHost {
     /** "loading", "ready" or "failed: ...". */
     @Volatile var state = "loading"; private set
 
+    /** Current phone pose from the activity's motion sensor: head input + raw tilt. */
+    @Volatile var pose: FloatArray = EchoBrain.poseFeatures(0f, 0f); private set
+    @Volatile var tiltDeg = 0f; private set
+
+    fun setPose(tilt: Float, roll: Float) {
+        tiltDeg = tilt
+        pose = EchoBrain.poseFeatures(tilt, roll)
+    }
+
     /** FINISH LEARNING: train flat out until the queue is empty, then save. */
     @Volatile var finishing = false
     @Volatile var stepsPerSec = 0.0; private set
@@ -65,7 +74,8 @@ object BrainHost {
         startTrainer()
     }
 
-    fun samplesDir(context: Context) = File(context.getExternalFilesDir(null), "samples/v2") // v2: echo_features input
+    // v3: echo_features input + phone pose (.mdp). Older folders hold samples without a pose.
+    fun samplesDir(context: Context) = File(context.getExternalFilesDir(null), "samples/v3")
 
     /** Runs [task] on the brain thread; failures are logged and reported, never crash the app. */
     fun submit(what: String, onFail: ((Throwable) -> Unit)? = null, task: () -> Unit): Boolean = try {

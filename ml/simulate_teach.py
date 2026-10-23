@@ -15,12 +15,12 @@ rng = np.random.default_rng(0); idx = rng.permutation(len(echo))
 teach, hold = idx[:2000], idx[2000:2600]       # "rooms you walked around" vs held-out frames
 it = Interpreter(model_path=model)
 infer, train = it.get_signature_runner('infer'), it.get_signature_runner('train')
-def l1(ids): return float(np.mean([np.abs(infer(echo=echo[i:i+1])['depth'][0] - depth[i]).mean() for i in ids]))
-out = infer(echo=echo[:1])['depth']
+def l1(ids): return float(np.mean([np.abs(infer(echo=echo[i:i+1], pose=np.zeros((1, 2), np.float32))['depth'][0] - depth[i]).mean() for i in ids]))
+out = infer(echo=echo[:1], pose=np.zeros((1, 2), np.float32))['depth']
 print('output finite:', np.isfinite(out).all(), 'range', round(float(out.min()), 3), round(float(out.max()), 3))
 print('held-out L1 before on-device training:', round(l1(hold), 4))
 for step in range(int(sys.argv[3]) if len(sys.argv) > 3 else 300):
     b = rng.choice(teach, 8)
-    loss = train(echo=echo[b], depth=depth[b], lr=np.float32(0.1))['loss']
+    loss = train(echo=echo[b], pose=np.zeros((8, 2), np.float32), depth=depth[b], lr=np.float32(0.1))['loss']
 print('train loss after N steps:', round(float(loss), 4))
 print('held-out L1 after on-device training: ', round(l1(hold), 4))

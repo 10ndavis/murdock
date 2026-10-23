@@ -98,6 +98,8 @@ void _mockNative({required int samples, bool broken = false, double tilt = 35, b
             'samplesDir': '/sdcard/Android/data/com.murdock.murdock/files/samples',
             'pendingSteps': pending,
             'finishing': finishing,
+            'tiltCoverage': [0, 0, 0, 0, 0, 120, samples, 80, 10, 0, 0, 0],
+            'coverageHere': samples,
             'stepsPerSec': 120.0,
             'teacherBackend': 'gpu',
             'teacherMs': 42,

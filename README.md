@@ -103,6 +103,14 @@ On-device training is guarded: gradients are clipped (norm 1.0), the learning ra
 input to the `train` signature, and if a step or a prediction is ever invalid the app restores
 the last good weights (snapshotted every 500 steps) and halves the rate. Invalid weights are
 never saved, and saved weights that produce invalid output are discarded at startup.
+
+The phone's **tilt and roll are inputs** to the head (`pose_features`), recorded with every
+sample (`.mdp` files). The same room sounds and looks different at other angles, so the AI
+learns per angle instead of needing one fixed grip; the app tracks how much it has learned
+per 10° of tilt and says when you're at an angle it hasn't learned yet. Old pose-free
+weights load with the new pose rows at zero (identical output at pose 0). In a simulated
+two-grip session on the phone runtime, the angle input cut held-out error from 0.215 to
+0.162.
 * **Teacher**: MiDaS v2.1 small, 256×256, downloaded at runtime. Depth Anything V2 Small is
   more accurate and could replace it later. I didn't find a verified TFLite build of it, but
   Qualcomm AI Hub and Arm's ExecuTorch guide both run it on Android.

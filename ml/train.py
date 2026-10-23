@@ -15,18 +15,20 @@ import numpy as np
 import tensorflow as tf
 
 from dataset import load_dir
-from murdock_model import build_student, depth_loss
+from murdock_model import build_student, depth_loss, load_student_weights
 
 
-def augment(echo, depth):
+def augment(inputs, depth):
     """Label-preserving variations so the model learns echo patterns, not rooms.
 
-    echo: [STACK, RANGE_BINS, 2] log-scaled; depth: [D, D] nearness.
+    inputs: (echo [STACK, RANGE_BINS, 2] log-scaled, pose [tilt, roll]); depth: [D, D].
     """
-    # Mirror the world: swap left/right mics and flip the depth map horizontally.
+    echo, pose = inputs
+    # Mirror the world: swap left/right mics, flip the depth map, and lean the other way.
     if tf.random.uniform([]) < 0.5:
         echo = echo[..., ::-1]
         depth = depth[:, ::-1]
+        pose = pose * tf.constant([1.0, -1.0])
     # Overall loudness (log domain) and per-mic imbalance.
     echo = echo + tf.random.uniform([], -0.06, 0.06) + tf.random.uniform([1, 1, 2], -0.02, 0.02)
     # Background noise.
@@ -34,7 +36,7 @@ def augment(echo, depth):
     # +-1 range bin of alignment jitter.
     shift = tf.random.uniform([], -1, 2, dtype=tf.int32)
     echo = tf.roll(echo, shift, axis=1)
-    return tf.clip_by_value(echo, 0.0, 1.0), depth
+    return (tf.clip_by_value(echo, 0.0, 1.0), pose), depth
 
 
 def main():
@@ -51,20 +53,22 @@ def main():
 
     def load(dirs):
         parts = [load_dir(d) for d in dirs]
-        return np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts])
+        echo, pose, depth = (np.concatenate([p[i] for p in parts]) for i in range(3))
+        return (echo, pose), depth
 
-    echo, depth = load(args.data)
+    train = load(args.data)
     if args.val:
         val = load(args.val)
-        train = (echo, depth)
     else:
         # Hold out a contiguous tail: neighbouring pings are near-duplicates, so a random
         # split would leak and make validation look far better than reality.
+        (echo, pose), depth = train
         split = int(len(echo) * 0.9)
-        train, val = (echo[:split], depth[:split]), (echo[split:], depth[split:])
+        train = (echo[:split], pose[:split]), depth[:split]
+        val = (echo[split:], pose[split:]), depth[split:]
     model, _, _ = build_student()
     if args.pretrained:
-        model.load_weights(args.pretrained)
+        load_student_weights(model, args.pretrained)
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr), loss=depth_loss)
     ds = tf.data.Dataset.from_tensor_slices(train).shuffle(min(len(train[0]), 50000))
     if not args.no_augment:

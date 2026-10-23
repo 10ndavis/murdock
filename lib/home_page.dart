@@ -71,12 +71,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _finishing = false;
   int _finishTotal = 0;
 
-  // Grip: live tilt from the motion sensor, and the average tilt while learning (saved).
+  // Grip: live tilt from the motion sensor (also an input to the echo AI, natively).
   double _tilt = kIdealTilt;
   double _roll = 0;
-  double? _taughtTilt;
-  double _sessionTiltSum = 0;
-  int _sessionTiltN = 0;
 
   @override
   void initState() {
@@ -92,7 +89,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _tilt = p.tilt;
           _roll = p.roll;
         })));
-    _sonar.getNumber('taughtTilt3').then((t) => _taughtTilt = t);
     _sonar.getFlag('assistOff').then((off) => setState(() => _assist = !off));
     _subs.add(_sonar.stats.listen((s) => setState(() {
           _stats = s;
@@ -203,8 +199,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _setAssist(false);
         return;
       }
-      _sessionTiltSum = 0;
-      _sessionTiltN = 0;
       try {
         await _camera.start(_onCameraFrame);
       } catch (e) {
@@ -220,14 +214,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await _camera.stop();
     _teacherMap = null;
     await _sonar.save();
-    // Remember how the phone was held while learning, so SEE can ask for the same grip.
-    if (_sessionTiltN > 25) {
-      final session = _sessionTiltSum / _sessionTiltN;
-      final prev = _taughtTilt;
-      _taughtTilt = prev == null ? session : (prev + session) / 2;
-      await _sonar.setNumber('taughtTilt3', _taughtTilt!);
-      _sessionTiltN = 0;
-    }
   }
 
   /// Every camera frame: if the camera can see, get its depth (to sharpen the echo view) and,
@@ -245,10 +231,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _teacherMs = r.ms;
     _teacherBackend = r.backend;
     _lastFrameLearned = learn;
-    if (learn) {
-      _sessionTiltSum += _tilt;
-      _sessionTiltN++;
-    }
   }
 
   /// How much the camera can currently help, 0 (sound only) .. 1 (well lit).
@@ -481,7 +463,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
           ]),
           const SizedBox(height: 8),
-          _grip(checkTaught: true),
+          _grip(checkCoverage: true),
         ]),
       ),
     ]);
@@ -720,18 +702,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ]),
       );
 
-  /// Live GRIP coaching: tilt, sideways, covered speaker, and (in SEE) "not how you taught it".
-  Widget _grip({bool checkTaught = false}) => GripBadge(
-        advice: GripAdvice.of(
-          tilt: _tilt,
-          roll: _roll,
-          directDb: _stats?.directDb ?? double.nan,
-          taughtTilt: _taughtTilt,
-          checkTaught: checkTaught,
-        ),
+  /// Live GRIP coaching: physics (covered, sideways, flat, aimed at you) and, in SEE, whether
+  /// the echo AI has learned at the current angle yet.
+  Widget _grip({bool checkCoverage = false}) {
+    final coverage = _status?.tiltCoverage ?? const <int>[];
+    return GripBadge(
+      advice: GripAdvice.of(
         tilt: _tilt,
-        palette: _palette,
-      );
+        roll: _roll,
+        directDb: _stats?.directDb ?? double.nan,
+        coverage: coverage,
+        checkCoverage: checkCoverage,
+      ),
+      tilt: _tilt,
+      palette: _palette,
+      coverage: coverage,
+    );
+  }
 
   /// Re-learn the speaker's own sound so it can be filtered out of the echoes.
   Widget _calibrateButton() {

@@ -104,6 +104,9 @@ class MainActivity : FlutterActivity() {
                     "pendingSteps" to (b?.pendingSteps ?: 0),
                     "stepsPerSec" to BrainHost.stepsPerSec,
                     "finishing" to BrainHost.finishing,
+                    // Samples learned per tilt bin, and at the current tilt, for the GRIP strip.
+                    "tiltCoverage" to (b?.tiltCoverage?.toList() ?: emptyList<Int>()),
+                    "coverageHere" to (b?.coverageAt(BrainHost.tiltDeg) ?: 0),
                     "teacherBackend" to (teacher?.backend ?: ""),
                     "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))
@@ -179,11 +182,14 @@ class MainActivity : FlutterActivity() {
      */
     private fun teach(rgb: ByteArray, learn: Boolean, result: MethodChannel.Result) {
         val stack = latestStack
+        // The angle the phone was held at when these echoes were heard.
+        val pose = BrainHost.pose
+        val tilt = BrainHost.tiltDeg
         if (stack == null) { result.error("sonar", "sonar not running", null); return }
         submit(teacherThread, "teacher", result) {
             val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
             val depth = t.run(rgb)
-            if (learn) submitBrain("training") { brain?.addSample(stack, depth) }
+            if (learn) submitBrain("training") { brain?.addSample(stack, pose, depth, tilt) }
             reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
         }
     }
@@ -197,7 +203,7 @@ class MainActivity : FlutterActivity() {
         val queued = submitBrain("echo AI") {
             try {
                 val b = brain ?: return@submitBrain
-                val depth = b.infer(stack)
+                val depth = b.infer(stack, BrainHost.pose)
                 emit(mapOf(
                     "type" to "brain",
                     "depth" to depth,
@@ -268,6 +274,7 @@ class MainActivity : FlutterActivity() {
             val (gx, gy, gz) = e.values
             val tilt = Math.toDegrees(kotlin.math.atan2(gz.toDouble(), -gy.toDouble()))
             val roll = Math.toDegrees(kotlin.math.atan2(-gx.toDouble(), kotlin.math.hypot(gy.toDouble(), gz.toDouble())))
+            BrainHost.setPose(tilt.toFloat(), roll.toFloat())   // the echo AI's angle input
             emit(mapOf("type" to "pose", "tilt" to tilt, "roll" to roll))
         }
 

@@ -5,13 +5,22 @@ import 'package:flutter/material.dart';
 import '../render/palette.dart';
 import 'hud.dart';
 
-/// Recommended grip: the app runs UPSIDE DOWN, so the speaker (normally the bottom edge) is
-/// at the top. Hold it like you're reading it, top tilted away from you by about this much:
-/// the screen faces you comfortably, the speaker aims ahead and up, the back camera faces the
-/// room (angled slightly down).
+/// Grip. The app runs UPSIDE DOWN, so the speaker (normally the bottom edge) is at the top;
+/// holding it like you're reading it aims the speaker ahead.
+///
+/// There is no single "right" angle: the phone's tilt and roll are inputs to the echo AI, so
+/// it learns how the room sounds and looks at each angle it has been taught. What matters is
+/// (1) physics: the speaker must not be covered or aimed at you/the floor, and (2) whether
+/// it has learned at the current angle yet. kIdealTilt is only the suggested starting grip.
 /// Tilt sign (from MainActivity): positive = top (speaker end) away from you; 90 = flat.
 const double kIdealTilt = 35;
-const double kTiltTolerance = 15;
+
+/// Coverage bins, matching EchoBrain.TILT_* (Kotlin).
+const double kTiltFromDeg = -30;
+const double kTiltBinDeg = 10;
+
+/// Samples at an angle before it counts as "learned there".
+const int kAngleLearned = 40;
 
 enum GripLevel { ok, warn, bad }
 
@@ -23,13 +32,13 @@ class GripAdvice {
   final String detail;
 
   /// [tilt]/[roll] from the motion sensor; [directDb] = speaker loudness vs calibration;
-  /// [taughtTilt] = average tilt while learning (only checked when [checkTaught]).
+  /// [coverage] = samples learned per tilt bin (checked only when [checkCoverage]).
   static GripAdvice of({
     required double tilt,
     required double roll,
     required double directDb,
-    double? taughtTilt,
-    bool checkTaught = false,
+    List<int> coverage = const [],
+    bool checkCoverage = false,
   }) {
     if (!directDb.isNaN && directDb < -8) {
       return const GripAdvice(GripLevel.bad, 'SPEAKER OR MIC COVERED?',
@@ -40,22 +49,32 @@ class GripAdvice {
     }
     if (tilt > 75) {
       return const GripAdvice(GripLevel.bad, 'TOO FLAT',
-          'The camera is aiming at the floor. Raise the top of the phone a bit.');
+          'The speaker aims at the ceiling and the camera at the floor. Raise the top a bit.');
     }
     if (tilt < -10) {
-      return const GripAdvice(GripLevel.bad, 'TOP LEANING TOWARD YOU',
-          'The speaker is aiming at you. Tilt the top of the phone away from you, like reading it.');
+      return const GripAdvice(GripLevel.bad, 'SPEAKER AIMED AT YOU',
+          'The top is leaning toward you. Tilt it away, like reading the phone.');
     }
-    if (checkTaught && taughtTilt != null && (tilt - taughtTilt).abs() > 15) {
-      return GripAdvice(GripLevel.warn, 'NOT HOW YOU TAUGHT IT',
-          'You taught it at ${taughtTilt.round()}°; now ${tilt.round()}°. Match the grip for a better picture.');
+    if (checkCoverage && coverage.isNotEmpty) {
+      final here = coverage[_bin(tilt, coverage.length)];
+      if (here < kAngleLearned) {
+        var best = 0;
+        for (var i = 1; i < coverage.length; i++) {
+          if (coverage[i] > coverage[best]) best = i;
+        }
+        final bestDeg = (kTiltFromDeg + (best + 0.5) * kTiltBinDeg).round();
+        final hint = coverage[best] >= kAngleLearned
+            ? 'Keep camera assist on to teach it, or go back to about $bestDeg°, where it knows the room best.'
+            : 'Keep camera assist on with the lights on to teach it.';
+        return GripAdvice(GripLevel.warn, 'NEW ANGLE · ${tilt.round()}°',
+            'Only $here frames learned at this angle so far, so the picture is less reliable. $hint');
+      }
+      return GripAdvice(GripLevel.ok, 'GRIP OK · LEARNED HERE', '${tilt.round()}° · $here frames learned at this angle');
     }
-    if ((tilt - kIdealTilt).abs() > kTiltTolerance) {
-      return GripAdvice(GripLevel.warn, tilt < kIdealTilt ? 'TILT THE TOP AWAY A LITTLE' : 'RAISE THE TOP A LITTLE',
-          'Aim for about ${kIdealTilt.round()}° so the top speaker points ahead. Now ${tilt.round()}°.');
-    }
-    return GripAdvice(GripLevel.ok, 'GRIP OK', '${tilt.round()}° · fingers clear of the top edge');
+    return GripAdvice(GripLevel.ok, 'GRIP OK', '${tilt.round()}° · speaker clear and aimed ahead');
   }
+
+  static int _bin(double tilt, int n) => ((tilt - kTiltFromDeg) / kTiltBinDeg).floor().clamp(0, n - 1);
 }
 
 Color gripColour(GripLevel l) => switch (l) {
@@ -66,11 +85,12 @@ Color gripColour(GripLevel l) => switch (l) {
 
 /// Compact strip: side-view tilt gauge + what to do.
 class GripBadge extends StatelessWidget {
-  const GripBadge({super.key, required this.advice, required this.tilt, required this.palette});
+  const GripBadge({super.key, required this.advice, required this.tilt, required this.palette, this.coverage = const []});
 
   final GripAdvice advice;
   final double tilt;
   final SightPalette palette;
+  final List<int> coverage;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +99,7 @@ class GripBadge extends StatelessWidget {
       palette: palette,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(children: [
-        SizedBox(width: 44, height: 44, child: CustomPaint(painter: TiltGaugePainter(tilt, c))),
+        SizedBox(width: 44, height: 44, child: CustomPaint(painter: TiltGaugePainter(tilt, c, coverage))),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
@@ -93,23 +113,30 @@ class GripBadge extends StatelessWidget {
   }
 }
 
-/// The phone seen from the side (you are on the left, the room on the right), the green
-/// target wedge, and the speaker's sound beam leaving the top edge.
+/// The phone seen from the side (you are on the left, the room on the right), the angles it
+/// has learned (green, brighter = more), and the speaker's sound beam leaving the top edge.
 class TiltGaugePainter extends CustomPainter {
-  TiltGaugePainter(this.tilt, this.colour);
+  TiltGaugePainter(this.tilt, this.colour, [this.coverage = const []]);
 
   final double tilt;
   final Color colour;
+  final List<int> coverage;
 
   @override
   void paint(Canvas canvas, Size size) {
     final c = size.center(Offset.zero);
     final r = size.shortestSide / 2;
     double rad(double deg) => deg * math.pi / 180;
-    // Target zone around the ideal tilt (angles measured from vertical, top toward you).
-    final zone = Paint()..color = const Color(0xFF3DFFB5).withValues(alpha: 0.18);
-    canvas.drawArc(Rect.fromCircle(center: c, radius: r), -math.pi / 2 + rad(kIdealTilt - kTiltTolerance),
-        rad(2 * kTiltTolerance), true, zone);
+    // Learned angles; before any learning, the suggested starting grip.
+    final bins = coverage.isEmpty || coverage.every((v) => v == 0)
+        ? [for (var i = 0; i < 12; i++) ((kTiltFromDeg + (i + 0.5) * kTiltBinDeg) - kIdealTilt).abs() < 15 ? kAngleLearned : 0]
+        : coverage;
+    for (var i = 0; i < bins.length; i++) {
+      if (bins[i] == 0) continue;
+      final a = (bins[i] / kAngleLearned).clamp(0.15, 1.0);
+      canvas.drawArc(Rect.fromCircle(center: c, radius: r), -math.pi / 2 + rad(kTiltFromDeg + i * kTiltBinDeg),
+          rad(kTiltBinDeg), true, Paint()..color = const Color(0xFF3DFFB5).withValues(alpha: 0.28 * a));
+    }
     canvas.save();
     canvas.translate(c.dx, c.dy);
     canvas.rotate(rad(tilt.clamp(-90, 90)));
@@ -127,5 +154,5 @@ class TiltGaugePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(TiltGaugePainter old) => old.tilt != tilt || old.colour != colour;
+  bool shouldRepaint(TiltGaugePainter old) => old.tilt != tilt || old.colour != colour || old.coverage != coverage;
 }

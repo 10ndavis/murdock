@@ -16,11 +16,11 @@ rng = np.random.default_rng(0); idx = rng.permutation(len(echo))
 hold, teach = idx[:600], idx[600:600 + n_teach]
 it = Interpreter(model_path=model)
 infer, train = it.get_signature_runner('infer'), it.get_signature_runner('train')
-def l1(ids): return float(np.mean([np.abs(infer(echo=echo[i:i+1])['depth'][0] - depth[i]).mean() for i in ids]))
+def l1(ids): return float(np.mean([np.abs(infer(echo=echo[i:i+1], pose=np.zeros((1, 2), np.float32))['depth'][0] - depth[i]).mean() for i in ids]))
 before = l1(hold)
 for s in range(steps):
     b = rng.choice(teach, 8)
     kw = {'lr': lr} if lr is not None else {}
-    loss = train(echo=echo[b], depth=depth[b], **kw)['loss']
+    loss = train(echo=echo[b], pose=np.zeros((8, 2), np.float32), depth=depth[b], **kw)['loss']
     assert np.isfinite(loss), f'NaN at step {s}'
 print(f'lr={lr} samples={n_teach:5d} steps={steps}: held-out L1 {before:.4f} -> {l1(hold):.4f} ({(1 - l1(hold) / before) * 100:.0f}% better)', flush=True)

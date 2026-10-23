@@ -5,8 +5,12 @@ Keep these constants in sync with android/app/src/main/kotlin/com/murdock/murdoc
 The network is split in two so it can be fine-tuned on the phone:
   trunk: conv encoder, echo stack -> 512-d latent. Trained on a PC (train.py),
          frozen on device (conv weight gradients need TF "flex" ops LiteRT lacks).
-  head:  two dense layers, latent -> 32x32 nearness map. Trainable on device using
-         only builtin LiteRT ops (activations use hand-written gradients below).
+  head:  two dense layers, (latent + phone pose) -> 32x32 nearness map. Trainable on
+         device using only builtin LiteRT ops (activations use hand-written gradients).
+
+Phone pose (tilt, roll) is a head input: the same room sounds and looks different at other
+angles, so the AI learns per angle instead of needing one fixed grip. BatVision (a robot)
+has no tilt; its samples use pose 0 and the on-device learning fills in the rest.
 """
 
 import tensorflow as tf
@@ -19,9 +23,17 @@ STACK = 16                  # pings stacked into one model input (~0.7 s)
 CHANNELS = 2                # stereo mics (mono phones duplicate the channel)
 DEPTH_SIZE = 32             # output nearness map is DEPTH_SIZE x DEPTH_SIZE
 LATENT = 512
+POSE_DIM = 2                # (tilt / 90°, roll / 90°), see pose_features()
 
 INPUT_SHAPE = (STACK, RANGE_BINS, CHANNELS)
 OUTPUT_SHAPE = (DEPTH_SIZE, DEPTH_SIZE)
+POSE_SHAPE = (POSE_DIM,)
+
+
+def pose_features(tilt_deg, roll_deg):
+    """Phone angle -> head input. Mirrors EchoBrain.poseFeatures (Kotlin)."""
+    import numpy as np
+    return np.clip(np.array([tilt_deg / 90.0, roll_deg / 90.0], np.float32), -1.5, 1.5)
 
 
 @tf.custom_gradient
@@ -59,20 +71,55 @@ def build_trunk() -> tf.keras.Model:
     return tf.keras.Model(inp, x, name="trunk")
 
 
-def build_head() -> tf.keras.Model:
+def build_head(pose_dim: int = POSE_DIM) -> tf.keras.Model:
     L = tf.keras.layers
-    inp = L.Input((LATENT,), name="latent")
-    x = L.Dense(1024, activation=relu_b)(inp)
+    latent = L.Input((LATENT,), name="latent")
+    inputs = [latent]
+    x = latent
+    if pose_dim:
+        pose = L.Input((pose_dim,), name="pose")
+        inputs.append(pose)
+        x = L.Concatenate()([latent, pose])
+    x = L.Dense(1024, activation=relu_b)(x)
     x = L.Dense(DEPTH_SIZE * DEPTH_SIZE, activation=sigmoid_b)(x)
     out = L.Reshape(OUTPUT_SHAPE, name="depth")(x)
-    return tf.keras.Model(inp, out, name="head")
+    return tf.keras.Model(inputs, out, name="head")
 
 
-def build_student():
-    trunk, head = build_trunk(), build_head()
-    inp = tf.keras.layers.Input(INPUT_SHAPE, name="echo")
-    model = tf.keras.Model(inp, head(trunk(inp)), name="murdock_student")
+def build_student(pose_dim: int = POSE_DIM):
+    """Returns (model, trunk, head). model inputs: [echo, pose] (or just echo if pose_dim=0)."""
+    trunk, head = build_trunk(), build_head(pose_dim)
+    echo = tf.keras.layers.Input(INPUT_SHAPE, name="echo")
+    if pose_dim:
+        pose = tf.keras.layers.Input((pose_dim,), name="pose")
+        model = tf.keras.Model([echo, pose], head([trunk(echo), pose]), name="murdock_student")
+    else:
+        model = tf.keras.Model(echo, head(trunk(echo)), name="murdock_student")
     return model, trunk, head
+
+
+def load_student_weights(model, path):
+    """Loads weights; also accepts weights saved before the pose input existed (the new
+    pose rows of the first head layer start at zero, so behaviour is unchanged until the
+    model learns to use the angle)."""
+    try:
+        model.load_weights(path)
+        return
+    except Exception:  # noqa: BLE001 - shape mismatch: legacy, pose-free weights
+        pass
+    legacy, _, _ = build_student(pose_dim=0)
+    legacy.load_weights(path)
+    old = legacy.get_weights()
+    new = model.get_weights()
+    assert len(old) == len(new), "unexpected architecture"
+    for i, (o, n) in enumerate(zip(old, new)):
+        if o.shape == n.shape:
+            new[i] = o
+        else:  # first head kernel: (LATENT, 1024) -> (LATENT + POSE_DIM, 1024)
+            assert o.shape[0] == LATENT and n.shape[0] == LATENT + POSE_DIM, (o.shape, n.shape)
+            new[i] = n * 0
+            new[i][:LATENT] = o
+    model.set_weights(new)
 
 
 def _diff_matrix(n):

@@ -24,7 +24,14 @@ class EchoBrain(
     private val weightsFile: File,
     private val samplesDir: File,
 ) {
-    private val replay = ArrayList<Pair<FloatArray, FloatArray>>()
+    /** One camera-labelled training example: echoes, phone pose (head input), camera depth. */
+    private class Sample(val echo: FloatArray, val pose: FloatArray, val depth: FloatArray)
+
+    private val replay = ArrayList<Sample>()
+
+    /** How many samples were learned at each phone tilt (TILT_BIN_DEG bins from TILT_FROM_DEG). */
+    val tiltCoverage = IntArray(TILT_BINS)
+    private val coverageFile get() = File(weightsFile.path + ".coverage")
     private var sampleOut: FileOutputStream? = null
 
     // Lifetime counters, persisted next to the weights so progress survives restarts.
@@ -71,6 +78,8 @@ class EchoBrain(
                     return Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
                 }
                 trainedSteps = meta!![0].toInt(); totalSamples = meta[1].toInt()
+                coverageFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")
+                    ?.mapNotNull { v -> v.toIntOrNull() }?.forEachIndexed { i, v -> if (i < TILT_BINS) tiltCoverage[i] = v }
                 // The training queue survives restarts too (older files don't have it).
                 stepBudget = meta.getOrNull(3)?.toFloatOrNull() ?: 0f
             } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
@@ -83,7 +92,7 @@ class EchoBrain(
 
     private fun outputIsFinite(target: Interpreter): Boolean {
         val out = direct(DEPTH_FLOATS)
-        target.runSignature(mapOf("echo" to direct(STACK_FLOATS)), mapOf("depth" to out), "infer")
+        target.runSignature(mapOf("echo" to direct(STACK_FLOATS), "pose" to direct(POSE_DIM)), mapOf("depth" to out), "infer")
         return out.toFloats(DEPTH_FLOATS).all { it.isFinite() }
     }
 
@@ -132,10 +141,10 @@ class EchoBrain(
     /** "ok", or how often training had to be rolled back (shown in System Check). */
     val health get() = if (rollbacks == 0) "ok" else "recovered $rollbacks× (learning rate ${"%.3f".format(lr)})"
 
-    fun infer(stack: FloatArray): FloatArray {
+    fun infer(stack: FloatArray, pose: FloatArray): FloatArray {
         repeat(2) {
             val out = direct(DEPTH_FLOATS)
-            interpreter.runSignature(mapOf("echo" to direct(stack)), mapOf("depth" to out), "infer")
+            interpreter.runSignature(mapOf("echo" to direct(stack), "pose" to direct(pose)), mapOf("depth" to out), "infer")
             val d = out.toFloats(DEPTH_FLOATS)
             if (d.all { it.isFinite() }) return d
             rollback("invalid prediction")
@@ -143,21 +152,28 @@ class EchoBrain(
         return FloatArray(DEPTH_FLOATS)
     }
 
-    /** Store a (echo, camera depth) pair for replay training and the PC dataset. */
-    fun addSample(stack: FloatArray, depth: FloatArray) {
+    /**
+     * Store an (echo, pose, camera depth) example for replay training and the PC dataset
+     * (.mdp, see ml/dataset.py). [tiltDeg] feeds the per-angle coverage shown in the app.
+     */
+    fun addSample(stack: FloatArray, pose: FloatArray, depth: FloatArray, tiltDeg: Float) {
         if (replay.size >= MAX_REPLAY) replay.removeAt(Random.nextInt(replay.size))
-        replay.add(stack to depth)
+        replay.add(Sample(stack, pose, depth))
         totalSamples++
+        tiltCoverage[tiltBin(tiltDeg)]++
         stepBudget = minOf(stepBudget + STEPS_PER_SAMPLE, MAX_BUDGET)
         if (recordToDisk) {
             val out = sampleOut ?: FileOutputStream(
-                File(samplesDir.apply { mkdirs() }, "session_${System.currentTimeMillis()}.mdk")
+                File(samplesDir.apply { mkdirs() }, "session_${System.currentTimeMillis()}.mdp")
             ).also { sampleOut = it }
-            val bb = ByteBuffer.allocate((STACK_FLOATS + DEPTH_FLOATS) * 4).order(ByteOrder.LITTLE_ENDIAN)
-            bb.asFloatBuffer().put(stack).put(depth)
+            val bb = ByteBuffer.allocate(RECORD_FLOATS * 4).order(ByteOrder.LITTLE_ENDIAN)
+            bb.asFloatBuffer().put(stack).put(pose).put(depth)
             out.write(bb.array())
         }
     }
+
+    /** Samples learned near [tiltDeg]. */
+    fun coverageAt(tiltDeg: Float) = tiltCoverage[tiltBin(tiltDeg)]
 
     /**
      * Continuous learning: each new camera-labelled sample earns STEPS_PER_SAMPLE training
@@ -182,8 +198,8 @@ class EchoBrain(
 
     /** Reload the most recent samples from disk so learning continues across restarts. */
     private fun loadRecentSamples() {
-        val files = samplesDir.listFiles { f -> f.name.endsWith(".mdk") }?.sortedByDescending { it.lastModified() } ?: return
-        val recordBytes = (STACK_FLOATS + DEPTH_FLOATS) * 4
+        val files = samplesDir.listFiles { f -> f.name.endsWith(".mdp") }?.sortedByDescending { it.lastModified() } ?: return
+        val recordBytes = RECORD_FLOATS * 4
         val bb = ByteBuffer.allocate(recordBytes).order(ByteOrder.LITTLE_ENDIAN)
         for (f in files) {
             if (replay.size >= MAX_REPLAY) break
@@ -194,8 +210,9 @@ class EchoBrain(
                         inp.readFully(bb.array())
                         val fb = bb.asFloatBuffer()
                         val e = FloatArray(STACK_FLOATS).also { fb.get(it) }
+                        val p = FloatArray(POSE_DIM).also { fb.get(it) }
                         val d = FloatArray(DEPTH_FLOATS).also { fb.get(it) }
-                        replay.add(e to d)
+                        replay.add(Sample(e, p, d))
                     }
                 }
             } catch (_: java.io.EOFException) {
@@ -210,6 +227,7 @@ class EchoBrain(
     /** A few SGD steps on random replay batches. Returns the mean loss (NaN if no data yet). */
     // Reused across steps (allocating direct buffers 50+ times a second churns native memory).
     private val trainEcho = direct(BATCH * STACK_FLOATS)
+    private val trainPose = direct(BATCH * POSE_DIM)
     private val trainDepth = direct(BATCH * DEPTH_FLOATS)
     private val trainLoss = direct(1)
     private val trainLr = direct(1)
@@ -219,16 +237,17 @@ class EchoBrain(
         var total = 0f
         var done = 0
         repeat(steps) {
-            trainEcho.clear(); trainDepth.clear()
-            val ef = trainEcho.asFloatBuffer(); val df = trainDepth.asFloatBuffer()
+            trainEcho.clear(); trainPose.clear(); trainDepth.clear()
+            val ef = trainEcho.asFloatBuffer(); val pf = trainPose.asFloatBuffer(); val df = trainDepth.asFloatBuffer()
             repeat(BATCH) {
-                val (e, d) = replay[Random.nextInt(replay.size)]
-                ef.put(e); df.put(d)
+                val sample = replay[Random.nextInt(replay.size)]
+                ef.put(sample.echo); pf.put(sample.pose); df.put(sample.depth)
             }
             trainLoss.clear()
             trainLr.clear(); trainLr.asFloatBuffer().put(lr)
             interpreter.runSignature(
-                mapOf("echo" to trainEcho, "depth" to trainDepth, "lr" to trainLr), mapOf("loss" to trainLoss), "train")
+                mapOf("echo" to trainEcho, "pose" to trainPose, "depth" to trainDepth, "lr" to trainLr),
+                mapOf("loss" to trainLoss), "train")
             val l = trainLoss.toFloats(1)[0]
             if (!l.isFinite() || l > MAX_SANE_LOSS) {
                 rollback("loss $l")
@@ -260,6 +279,7 @@ class EchoBrain(
         }
         tmp.renameTo(weightsFile) // atomic: a crash mid-save can't leave a corrupt file
         metaFile.writeText("$trainedSteps $totalSamples $modelId $stepBudget")
+        coverageFile.writeText(tiltCoverage.joinToString(" "))
         sampleOut?.flush()
     }
 
@@ -290,7 +310,9 @@ class EchoBrain(
         rollbacks = 0
         snapshot()
         sampleOut?.close(); sampleOut = null
-        samplesDir.listFiles { f -> f.name.endsWith(".mdk") }?.forEach { it.delete() }
+        samplesDir.listFiles { f -> f.name.endsWith(".mdp") }?.forEach { it.delete() }
+        tiltCoverage.fill(0)
+        coverageFile.delete()
         trainedSteps = 0
         totalSamples = 0
         lastLoss = Float.NaN
@@ -308,13 +330,27 @@ class EchoBrain(
     // textual order, and these use fields declared above (good, trainEcho, ...).
     init {
         interpreter = open()
+        val freshHead = !weightsFile.exists()
         snapshot()
         loadRecentSamples()
+        // New model (or first run) but samples on disk: queue learning them again.
+        if (freshHead && stepBudget < 1f) stepBudget = minOf(replay.size * STEPS_PER_SAMPLE, MAX_BUDGET)
     }
 
     companion object {
         private const val TAG = "EchoBrain"
         const val BATCH = 8           // fixed by the exported train signature
+        const val POSE_DIM = 2        // (tilt / 90°, roll / 90°); ml/murdock_model.py pose_features
+        private const val RECORD_FLOATS = STACK_FLOATS + POSE_DIM + DEPTH_FLOATS  // one .mdp record
+        const val TILT_FROM_DEG = -30f
+        const val TILT_BIN_DEG = 10f
+        const val TILT_BINS = 12      // -30° .. 90°
+
+        fun tiltBin(tiltDeg: Float) = ((tiltDeg - TILT_FROM_DEG) / TILT_BIN_DEG).toInt().coerceIn(0, TILT_BINS - 1)
+
+        /** Phone angle -> head input; mirrors ml/murdock_model.py pose_features. */
+        fun poseFeatures(tiltDeg: Float, rollDeg: Float) =
+            floatArrayOf((tiltDeg / 90f).coerceIn(-1.5f, 1.5f), (rollDeg / 90f).coerceIn(-1.5f, 1.5f))
         // Simulated on BatVision with the clipped trainer: 0.1 -> 23% better, 0.5 -> 27% and
         // still stable; 0.1 leaves headroom for noisier phone data.
         private const val DEFAULT_LR = 0.1f
