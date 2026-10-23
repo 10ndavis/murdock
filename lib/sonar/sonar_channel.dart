@@ -152,7 +152,8 @@ class SonarChannel {
 
   Stream<BrainFrame> get brain => _raw.where((m) => m['type'] == 'brain').map(BrainFrame.new);
 
-  /// Phone tilt in degrees: 0 = upright portrait, 90 = flat screen-up; roll ~±90 = landscape.
+  /// Phone tilt in degrees: 0 = upright portrait, positive = top tilted toward you (speaker
+  /// aims forward), -90 = lying flat screen-up. Roll ~±90 = landscape.
   Stream<({double tilt, double roll})> get pose => _raw
       .where((m) => m['type'] == 'pose')
       .map((m) => (tilt: (m['tilt']! as num).toDouble(), roll: (m['roll']! as num).toDouble()));

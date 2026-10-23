@@ -85,7 +85,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _tilt = p.tilt;
           _roll = p.roll;
         })));
-    _sonar.getNumber('taughtTilt').then((t) => _taughtTilt = t);
+    _sonar.getNumber('taughtTilt2').then((t) => _taughtTilt = t);
     _sonar.getFlag('assistOff').then((off) => setState(() => _assist = !off));
     _subs.add(_sonar.stats.listen((s) => setState(() {
           _stats = s;
@@ -202,7 +202,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final session = _sessionTiltSum / _sessionTiltN;
       final prev = _taughtTilt;
       _taughtTilt = prev == null ? session : (prev + session) / 2;
-      await _sonar.setNumber('taughtTilt', _taughtTilt!);
+      await _sonar.setNumber('taughtTilt2', _taughtTilt!);
       _sessionTiltN = 0;
     }
   }

@@ -34,13 +34,23 @@ void main() {
 
     test('ideal tilt is OK', () => expect(level(18), GripLevel.ok));
     test('bolt upright: tilt the top toward you', () => expect(level(0), GripLevel.warn));
-    test('speaker aimed at the floor', () => expect(level(-20), GripLevel.warn));
-    test('lying flat is bad', () => expect(level(70), GripLevel.bad));
+    test('top leaning away: speaker aims at you and the floor', () => expect(level(-20), GripLevel.warn));
+    test('lying flat (screen up) is bad', () => expect(level(-70), GripLevel.bad));
+    test('tilted far toward you is bad', () => expect(level(70), GripLevel.bad));
     test('landscape is bad', () => expect(level(18, roll: 80), GripLevel.bad));
     test('covered speaker beats everything', () => expect(level(18, db: -12), GripLevel.bad));
     test('a few dB quieter is fine', () => expect(level(18, db: -3), GripLevel.ok));
     test('SEE warns when the grip differs from teaching',
         () => expect(level(25, taught: 5, see: true), GripLevel.warn));
     test('TEACH ignores the taught grip', () => expect(level(25, taught: 5), GripLevel.ok));
+  });
+
+  test('grip messages point the right way', () {
+    String title(double t) =>
+        GripAdvice.of(tilt: t, roll: 0, directDb: double.nan).title;
+    expect(title(0), 'TILT THE TOP TOWARD YOU A LITTLE'); // upright: needs top toward you
+    expect(title(-20), 'TILT THE TOP TOWARD YOU'); // leaning away: needs top toward you
+    expect(title(40), 'TILT THE TOP BACK A LITTLE'); // too far toward you
+    expect(title(18), 'GRIP OK');
   });
 }

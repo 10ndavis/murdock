@@ -7,6 +7,7 @@ import 'hud.dart';
 
 /// Recommended grip: portrait, back camera facing the room, top tilted toward you by about
 /// this much so the bottom-edge speaker points forward instead of at the floor.
+/// Tilt sign (from MainActivity): positive = top toward you, negative = top away / screen up.
 const double kIdealTilt = 18;
 const double kTiltTolerance = 12;
 
@@ -35,19 +36,23 @@ class GripAdvice {
     if (roll.abs() > 35) {
       return const GripAdvice(GripLevel.bad, 'HOLD IT UPRIGHT', 'Turn the phone to portrait, back camera facing the room.');
     }
+    if (tilt < -40) {
+      return const GripAdvice(GripLevel.bad, 'TOO FLAT', 'Raise the phone upright so the back camera faces the room.');
+    }
     if (tilt > 55) {
-      return const GripAdvice(GripLevel.bad, 'TOO FLAT', 'Raise the phone so the back camera faces the room.');
+      return const GripAdvice(GripLevel.bad, 'TILTED TOO FAR TOWARD YOU',
+          'The camera is aiming at the ceiling. Bring the top of the phone back up.');
     }
     if (tilt < -5) {
       return const GripAdvice(GripLevel.warn, 'TILT THE TOP TOWARD YOU',
-          'The speaker is aiming at the floor. Lean the top of the phone toward you about 15°.');
+          'The top is leaning away, so the speaker aims at you and the floor. Lean the top toward you about 15°.');
     }
     if (checkTaught && taughtTilt != null && (tilt - taughtTilt).abs() > 15) {
       return GripAdvice(GripLevel.warn, 'NOT HOW YOU TAUGHT IT',
           'You taught it at ${taughtTilt.round()}°; now ${tilt.round()}°. Match the grip for a better picture.');
     }
     if ((tilt - kIdealTilt).abs() > kTiltTolerance) {
-      return GripAdvice(GripLevel.warn, tilt < kIdealTilt ? 'TILT THE TOP TOWARD YOU A LITTLE' : 'A BIT TOO FLAT',
+      return GripAdvice(GripLevel.warn, tilt < kIdealTilt ? 'TILT THE TOP TOWARD YOU A LITTLE' : 'TILT THE TOP BACK A LITTLE',
           'Aim for about ${kIdealTilt.round()}° so the bottom speaker points ahead. Now ${tilt.round()}°.');
     }
     return GripAdvice(GripLevel.ok, 'GRIP OK', '${tilt.round()}° · fingers clear of the bottom edge');

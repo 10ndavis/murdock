@@ -264,8 +264,11 @@ class MainActivity : FlutterActivity() {
     private fun reply(result: MethodChannel.Result, value: Any?) = main.post { result.success(value) }
 
     // ── Grip / tilt, for the GRIP indicator ─────────────────────────────────────────────
-    // Gravity in device coordinates -> tilt (0 = upright portrait, 90 = lying flat screen-up)
-    // and roll (sideways lean; ~±90 in landscape). Sent to Dart at most 5x a second.
+    // Gravity in device coordinates -> tilt and roll, sent to Dart at most 5x a second.
+    //   tilt: 0 = upright portrait; POSITIVE = top tilted toward the user (screen turning
+    //         toward the floor, bottom-edge speaker aiming forward); -90 = flat, screen up.
+    //   roll: sideways lean; about ±90 in landscape.
+    // (At rest the sensor reads +g along the axis pointing up: upright gives +y, screen-up +z.)
     private var lastPose = 0L
     private val poseListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
@@ -273,7 +276,7 @@ class MainActivity : FlutterActivity() {
             if (now - lastPose < 200) return
             lastPose = now
             val (gx, gy, gz) = e.values
-            val tilt = Math.toDegrees(kotlin.math.atan2(gz.toDouble(), gy.toDouble()))
+            val tilt = Math.toDegrees(kotlin.math.atan2(-gz.toDouble(), gy.toDouble()))
             val roll = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), kotlin.math.hypot(gy.toDouble(), gz.toDouble())))
             emit(mapOf("type" to "pose", "tilt" to tilt, "roll" to roll))
         }
