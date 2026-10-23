@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../render/palette.dart';
 import '../sonar/sonar_channel.dart';
 import 'hud.dart';
+import 'sound_panel.dart';
 
 enum _Level { ok, warn, bad }
 
@@ -38,6 +39,7 @@ class SystemCheck extends StatelessWidget {
         ? _Row('MEDIA VOLUME', '$vol%', _Level.ok)
         : _Row('MEDIA VOLUME', '$vol%', vol == 0 ? _Level.bad : _Level.warn,
             'Press volume UP while Murdock is open. The chirp needs to be loud to echo.'));
+    rows.add(_Row('CHIRP LOUDNESS', '${(s.loudness * 100).round()}%${s.tuning ? ' · auto-tuning…' : ''}', _Level.ok));
     if (s.mic.startsWith('failed')) {
       rows.add(_Row('MICROPHONE', s.mic, _Level.bad, 'Check microphone permission in Android settings.'));
     } else {
@@ -52,11 +54,12 @@ class SystemCheck extends StatelessWidget {
         : _Row('PINGS', '${s.pingsPerSec}/s', s.pingsPerSec == 0 ? _Level.bad : _Level.warn,
             'The app can\'t lock onto its own chirp. Turn the volume up and don\'t cover the top edge (the speaker, since the app runs upside down).'));
     final pct = (signal * 100).round();
+    final clarity = '$pct% · ${formatDb(s.clarityDb)}';
     rows.add(signal > 0.3
-        ? _Row('ECHO CLARITY', '$pct%', _Level.ok)
-        : _Row('ECHO CLARITY', '$pct%', signal > 0.08 ? _Level.warn : _Level.bad,
-            'Echoes are buried in noise. Raise the volume and try a quiet room. Some phones can\'t play or '
-            'record this high a pitch at all.'));
+        ? _Row('ECHO CLARITY', clarity, _Level.ok)
+        : _Row('ECHO CLARITY', clarity, signal > 0.08 ? _Level.warn : _Level.bad,
+            'Echoes are buried in noise. Raise the volume, then run AUTO-TUNE on RADAR facing a wall, in a '
+            'quiet room. Some phones can\'t play or record this high a pitch at all.'));
     rows.add(switch (s.calibration) {
       'saved' || 'done' => const _Row('SPEAKER FILTER', 'calibrated', _Level.ok),
       'calibrating' => const _Row('SPEAKER FILTER', 'learning… keep still', _Level.warn),

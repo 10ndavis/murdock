@@ -13,6 +13,8 @@ import com.murdock.murdock.SonarConfig.CHANNELS
 import com.murdock.murdock.SonarConfig.CHIRP_LEN
 import com.murdock.murdock.SonarConfig.ECHO_ZONE_BINS
 import com.murdock.murdock.SonarConfig.LOG_FLOOR
+import com.murdock.murdock.SonarConfig.MAX_LOUDNESS
+import com.murdock.murdock.SonarConfig.MIN_LOUDNESS
 import com.murdock.murdock.SonarConfig.PING_PERIOD
 import com.murdock.murdock.SonarConfig.POOL
 import com.murdock.murdock.SonarConfig.PROFILE_FLOATS
@@ -21,6 +23,7 @@ import com.murdock.murdock.SonarConfig.RANGE_SAMPLES
 import com.murdock.murdock.SonarConfig.SAMPLE_RATE
 import com.murdock.murdock.SonarConfig.STACK
 import com.murdock.murdock.SonarConfig.STACK_FLOATS
+import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
@@ -33,6 +36,10 @@ import kotlin.math.sqrt
  * record continuously. Each ping is matched-filtered (complex correlation with the chirp),
  * aligned to the direct speaker->mic peak, and reduced to a RANGE_BINS echo profile per
  * mic. This mirrors ml/features.py so models trained on a PC see the same features.
+ *
+ * Only the chirp's loudness is adjustable (slider, AUTO-TUNE): the model input is scaled by
+ * the strongest echo, so loudness changes the noise level but not the features' shape.
+ * Band, length and timing stay fixed because the echo AI was trained on exactly those.
  */
 class SonarEngine(
     private val context: Context,
@@ -46,6 +53,13 @@ class SonarEngine(
     private var recordThread: Thread? = null
 
     @Volatile var stereo = false; private set
+
+    /** Chirp loudness, as a fraction of full scale. Applied live; cancellation follows it. */
+    @Volatile var loudness = SonarConfig.CHIRP_AMPLITUDE
+        set(v) { field = v.coerceIn(MIN_LOUDNESS, MAX_LOUDNESS) }
+
+    /** True while the speaker filter is being learned or AUTO-TUNE runs: echoes aren't clean. */
+    val busy get() = calibratingLeft > 0 || tune != null
     @Volatile var sourceName = ""; private set
 
     // Live diagnostics, reported once a second through onStats.
@@ -75,6 +89,9 @@ class SonarEngine(
         running = false
         playThread?.join(500)
         recordThread?.join(500)
+        // A tune can't finish without pings: put the old settings back.
+        tuneRequest = false
+        tune?.let { it.saved.restore(); tune = null; it.report("cancelled") }
         playThread = null
         recordThread = null
     }
@@ -108,9 +125,13 @@ class SonarEngine(
             "direct" to lastDirect.toDouble(),
             "volume" to if (maxVol > 0) vol.toDouble() / maxVol else 0.0,
             "calibration" to calibrationState,
+            "loudness" to loudness.toDouble(),
+            // How far the strongest echo stands out of the noise, in dB (NaN until heard).
+            "clarityDb" to clarityDb(clarityProfile),
+            "tuning" to (tune != null),
             // Speaker->mic loudness vs. calibration, in dB. Strongly negative = something
             // (usually a finger) is covering the speaker or mic. NaN until calibrated.
-            "directDb" to if (calDirect > 0f && directAvg > 0f) (20 * log10(directAvg / calDirect)).toDouble() else Double.NaN,
+            "directDb" to if (calDirect > 0f && directAvg > 0f) (20 * log10(directAvg / (calDirect * cancelGain()))).toDouble() else Double.NaN,
         ))
         pings = 0
     }
@@ -119,12 +140,17 @@ class SonarEngine(
         // 16-bit PCM: the one output format every Android device supports.
         val ping = ShortArray(PING_PERIOD)
         val chirp = SonarConfig.chirpIQ[0]
-        for (n in 0 until CHIRP_LEN) ping[n] = (chirp[n] * SonarConfig.CHIRP_AMPLITUDE * Short.MAX_VALUE).toInt().toShort()
+        var builtFor = -1f
         val track = openTrack()
         try {
             track.play()
             speakerState = "playing"
             while (running) {
+                val l = loudness
+                if (l != builtFor) {
+                    for (n in 0 until CHIRP_LEN) ping[n] = (chirp[n] * l * Short.MAX_VALUE).toInt().toShort()
+                    builtFor = l
+                }
                 val n = track.write(ping, 0, ping.size)
                 if (n < 0) throw IllegalStateException("AudioTrack.write error $n")
             }
@@ -256,9 +282,11 @@ class SonarEngine(
                 var energy = 0f
                 for (f in 0 until frames) {
                     val l = chunk[f * inChannels] * scale
+                    val r = if (inChannels == 2) chunk[f * inChannels + 1] * scale else l
                     buf[0][bufLen + f] = l
-                    buf[1][bufLen + f] = if (inChannels == 2) chunk[f * inChannels + 1] * scale else l
+                    buf[1][bufLen + f] = r
                     energy += l * l
+                    micPeak = max(micPeak, max(abs(l), abs(r)))
                 }
                 micRms = sqrt(energy / frames)
                 bufLen += frames
@@ -325,6 +353,7 @@ class SonarEngine(
     @Volatile var calibrationState = "none"; private set
     private val templateFile get() = java.io.File(context.filesDir, "speaker_template.bin")
     @Volatile private var calDirect = 0f          // speaker->mic level while calibrating
+    @Volatile private var calLoudness = SonarConfig.CHIRP_AMPLITUDE  // loudness the template was learned at
     private var calDirectSum = 0f
 
     /** Learn the speaker->mic sound over the next CALIBRATION_PINGS pings. */
@@ -350,12 +379,16 @@ class SonarEngine(
             Log.w(TAG, "bad speaker template: $e")
             return
         }
-        // Appended in later versions; older files simply don't have it.
-        calDirect = try {
+        // Appended in later versions; older files simply don't have them (and were all
+        // recorded at the default loudness).
+        try {
             java.io.DataInputStream(f.inputStream().buffered()).use { inp ->
-                inp.skipBytes(CHANNELS * CANCEL_LEN * 8); inp.readFloat()
+                inp.skipBytes(CHANNELS * CANCEL_LEN * 8)
+                calDirect = inp.readFloat()
+                calLoudness = inp.readFloat()
             }
-        } catch (e: Exception) { 0f }
+        } catch (e: Exception) { /* keep defaults */ }
+        if (!(calLoudness > 0f)) calLoudness = SonarConfig.CHIRP_AMPLITUDE
     }
 
     private fun saveTemplate() {
@@ -364,6 +397,7 @@ class SonarEngine(
                 out.writeFloat(templateI[c][j]); out.writeFloat(templateQ[c][j])
             }
             out.writeFloat(calDirect)
+            out.writeFloat(calLoudness)
         }
     }
 
@@ -395,9 +429,11 @@ class SonarEngine(
             calDirectSum += hypot(corrI[0][0], corrQ[0][0]) / CALIBRATION_PINGS
             if (--calibratingLeft == 0) {
                 calDirect = calDirectSum
+                calLoudness = loudness
                 hasTemplate = true
                 calibrationState = "done"
-                try { saveTemplate() } catch (e: Exception) { Log.w(TAG, "save template: $e") }
+                // AUTO-TUNE saves only the template it keeps.
+                if (tune == null) persistTemplate()
             }
         }
 
@@ -405,6 +441,8 @@ class SonarEngine(
         val clean = FloatArray(PROFILE_FLOATS)     // display: speaker sound cancelled
         val pooled = FloatArray(PROFILE_FLOATS)    // model: cancelled magnitudes, pooled
         val cancel = hasTemplate && calibratingLeft == 0
+        // The speaker's sound scales with loudness; so does the template learned for it.
+        val gain = cancelGain()
         var directLevel = 0f
         for (c in 0 until CHANNELS) {
             val ref = max(hypot(corrI[c][0], corrQ[c][0]), 1e-9f)
@@ -420,7 +458,7 @@ class SonarEngine(
                     val i = corrI[c][j]; val q = corrQ[c][j]
                     r = max(r, hypot(i, q))
                     cleaned = max(cleaned,
-                        if (cancel && j < CANCEL_LEN) hypot(i - templateI[c][j], q - templateQ[c][j]) else hypot(i, q))
+                        if (cancel && j < CANCEL_LEN) hypot(i - gain * templateI[c][j], q - gain * templateQ[c][j]) else hypot(i, q))
                 }
                 raw[b * CHANNELS + c] = logScale(r / ref)
                 clean[b * CHANNELS + c] = logScale(cleaned / ref)
@@ -441,7 +479,159 @@ class SonarEngine(
         for (t in 0 until STACK) {
             System.arraycopy(history[(historyHead + t) % STACK], 0, stack, t * PROFILE_FLOATS, PROFILE_FLOATS)
         }
+        for (b in 0 until RANGE_BINS) {
+            val v = 0.5f * (pooled[b * CHANNELS] + pooled[b * CHANNELS + 1])
+            clarityProfile[b] = if (clarityProfile[b] == 0f) v else 0.9f * clarityProfile[b] + 0.1f * v
+        }
+        stepTune(pooled)
         onPing(raw, clean, stack, directLevel)
+    }
+
+    private fun cancelGain() = if (calLoudness > 0f) loudness / calLoudness else 1f
+
+    private fun persistTemplate() {
+        try { saveTemplate() } catch (e: Exception) { Log.w(TAG, "save template: $e") }
+    }
+
+    // ── Echo clarity + AUTO-TUNE ────────────────────────────────────────────────────────
+    // Clarity: how far the strongest echo beyond the speaker zone stands out above the
+    // typical (median) range bin of a time-averaged profile. Averaging over pings keeps
+    // steady echoes and flattens random noise, so pure noise scores only a few dB and a
+    // wall 4-6 ft away scores well above that.
+    private val clarityProfile = FloatArray(RANGE_BINS)
+    private var micPeak = 0f   // loudest mic sample since the tuner last reset it (clipping)
+
+    private fun clarityDb(profile: FloatArray): Double {
+        val far = profile.copyOfRange(CANCEL_BINS, RANGE_BINS)
+        val peak = far.max()
+        far.sort()
+        val median = far[far.size / 2]
+        if (!(median > 0f) || !(peak > 0f)) return Double.NaN
+        return 20 * log10((peak / median).toDouble())
+    }
+
+    /** Receives AUTO-TUNE progress and results (on the recorder thread). */
+    @Volatile var onTune: ((Map<String, Any>) -> Unit)? = null
+    @Volatile private var tune: Tune? = null
+    @Volatile private var tuneRequest = false
+    @Volatile private var tuneCancel = false
+
+    /**
+     * AUTO-TUNE: with the phone aimed at a wall 4-6 ft away, tries each loudness in
+     * [TUNE_LEVELS], keeps the quietest one within 1 dB of the clearest echo, then relearns
+     * the speaker filter at that loudness. Starts on the next ping; ~10 s.
+     */
+    fun autoTune() { tuneRequest = true }
+    fun cancelTune() { tuneCancel = true }
+
+    /** Everything a tune changes, so cancelling or failing puts it all back. */
+    private inner class Snapshot {
+        private val loud = loudness
+        private val ti = Array(CHANNELS) { templateI[it].copyOf() }
+        private val tq = Array(CHANNELS) { templateQ[it].copyOf() }
+        private val direct = calDirect
+        private val calLoud = calLoudness
+        private val had = hasTemplate
+        private val state = calibrationState
+
+        fun restore() {
+            calibratingLeft = 0
+            for (c in 0 until CHANNELS) { ti[c].copyInto(templateI[c]); tq[c].copyInto(templateQ[c]) }
+            calDirect = direct; calLoudness = calLoud; hasTemplate = had; calibrationState = state
+            loudness = loud
+        }
+    }
+
+    private inner class Tune {
+        val saved = Snapshot()
+        val clarity = DoubleArray(TUNE_LEVELS.size) { Double.NaN }
+        val clipped = BooleanArray(TUNE_LEVELS.size)
+        val sum = FloatArray(RANGE_BINS)
+        var level = 0
+        var phase = SETTLE
+        var count = 0
+        var best = -1
+        var done = 0              // pings so far, for the progress bar
+
+        fun report(state: String, message: String = "") {
+            onTune?.invoke(mapOf(
+                "type" to "tune",
+                "state" to state,
+                "phase" to phase,
+                "progress" to (done.toDouble() / TUNE_TOTAL_PINGS).coerceIn(0.0, 1.0),
+                "levels" to TUNE_LEVELS.map { it.toDouble() },
+                "clarity" to clarity.toList(),
+                "clipped" to clipped.toList(),
+                "testing" to loudness.toDouble(),
+                "best" to if (best >= 0) TUNE_LEVELS[best].toDouble() else Double.NaN,
+                "bestDb" to if (best >= 0) clarity[best] else Double.NaN,
+                "message" to message,
+            ))
+        }
+    }
+
+    /** Advances AUTO-TUNE by one ping. Runs on the recorder thread. */
+    private fun stepTune(pooled: FloatArray) {
+        if (tuneCancel) {
+            tuneCancel = false
+            tune?.let { it.saved.restore(); tune = null; it.report("cancelled") }
+        }
+        if (tuneRequest) {
+            tuneRequest = false
+            if (tune == null) tune = Tune().also { loudness = TUNE_LEVELS[0]; it.report("running") }
+        }
+        val t = tune ?: return
+        t.done++
+        when (t.phase) {
+            SETTLE -> if (++t.count >= TUNE_SETTLE_PINGS) {
+                // Audio already queued at the previous loudness has played out by now.
+                t.phase = MEASURE; t.count = 0; t.sum.fill(0f); micPeak = 0f
+                t.report("running")
+            }
+            MEASURE -> {
+                for (b in 0 until RANGE_BINS) t.sum[b] += 0.5f * (pooled[b * CHANNELS] + pooled[b * CHANNELS + 1])
+                if (++t.count >= TUNE_MEASURE_PINGS) {
+                    t.clarity[t.level] = clarityDb(t.sum)
+                    t.clipped[t.level] = micPeak >= CLIP_LEVEL
+                    if (++t.level < TUNE_LEVELS.size) {
+                        loudness = TUNE_LEVELS[t.level]
+                        t.phase = SETTLE; t.count = 0
+                        t.report("running")
+                    } else pickBest(t)
+                } else if (t.count % 8 == 0) t.report("running")
+            }
+            FINAL_SETTLE -> if (++t.count >= TUNE_SETTLE_PINGS) {
+                // Relearn the speaker's own sound at the chosen loudness. The wall is beyond
+                // the 3 ft speaker zone, so it isn't learned as part of it.
+                calibrate(); t.phase = FINAL_CALIBRATE
+                t.report("running")
+            }
+            FINAL_CALIBRATE -> if (calibratingLeft == 0) {
+                persistTemplate()
+                tune = null
+                t.done = TUNE_TOTAL_PINGS
+                t.report("done")
+            } else if (t.done % 8 == 0) t.report("running")
+        }
+    }
+
+    private fun pickBest(t: Tune) {
+        val ok = TUNE_LEVELS.indices.filter { !t.clipped[it] && !t.clarity[it].isNaN() }
+        val top = ok.maxOfOrNull { t.clarity[it] } ?: Double.NaN
+        if (ok.isEmpty() || top < TUNE_MIN_DB) {
+            t.saved.restore()
+            tune = null
+            t.report("failed", if (ok.isEmpty() && t.clipped.any { it })
+                "The mic is overloaded at every loudness. Turn the media volume down a little and try again."
+            else "No clear echo. Aim the top edge at a flat wall 4-6 ft away, keep still, and try a quieter room.")
+            return
+        }
+        // Quietest level within 1 dB of the clearest: the same picture, with less distortion
+        // and battery.
+        t.best = ok.filter { t.clarity[it] >= top - 1.0 }.minBy { TUNE_LEVELS[it] }
+        loudness = TUNE_LEVELS[t.best]
+        t.phase = FINAL_SETTLE; t.count = 0
+        t.report("running")
     }
 
     private fun logScale(v: Float) = min(1f, max(0f, (log10(v + LOG_FLOOR) + 4f) / 4f))
@@ -466,5 +656,21 @@ class SonarEngine(
         /** Lags (from the direct peak) covered by speaker cancellation: 252 ≈ 0.9 m / 3 ft. */
         const val CANCEL_LEN = 252
         private const val CALIBRATION_PINGS = 48   // ~2 s
+        private const val CANCEL_BINS = (CANCEL_LEN + POOL - 1) / POOL   // speaker zone, in range bins
+
+        /** Loudness levels AUTO-TUNE tries, quietest first. */
+        val TUNE_LEVELS = floatArrayOf(0.3f, 0.45f, 0.6f, 0.8f, 1.0f)
+        private const val TUNE_SETTLE_PINGS = 10     // ~0.4 s for queued audio to play out
+        private const val TUNE_MEASURE_PINGS = 24    // ~1 s of echoes per level
+        private const val TUNE_MIN_DB = 4.0          // below this, nothing was clearly heard
+        private const val CLIP_LEVEL = 0.98f         // mic samples this loud are clipping
+        private val TUNE_TOTAL_PINGS =
+            TUNE_LEVELS.size * (TUNE_SETTLE_PINGS + TUNE_MEASURE_PINGS) + TUNE_SETTLE_PINGS + CALIBRATION_PINGS
+
+        // AUTO-TUNE phases, also sent to the UI.
+        private const val SETTLE = "settle"
+        private const val MEASURE = "measure"
+        private const val FINAL_SETTLE = "final_settle"
+        private const val FINAL_CALIBRATE = "calibrate"
     }
 }

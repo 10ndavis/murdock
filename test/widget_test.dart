@@ -1,10 +1,12 @@
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:murdock/render/palette.dart';
 import 'package:murdock/render/vision_renderer.dart';
 import 'package:murdock/sonar/sonar_channel.dart';
 import 'package:murdock/ui/grip.dart';
+import 'package:murdock/ui/sound_panel.dart';
 
 void main() {
   test('palette ramps from black to hot', () {
@@ -63,5 +65,67 @@ void main() {
     final img = await tester.runAsync(() => r.render(0.5, SightPalette.radar));
     expect(img!.width, VisionRenderer.size);
     img.dispose();
+  });
+
+  group('auto-tune', () {
+    Map<Object?, Object?> event(String state, {String message = ''}) => {
+          'type': 'tune',
+          'state': state,
+          'phase': 'measure',
+          'progress': 0.4,
+          'levels': [0.3, 0.45, 0.6, 0.8, 1.0],
+          'clarity': [5.0, 8.5, double.nan, double.nan, double.nan],
+          'clipped': [false, true, false, false, false],
+          'testing': 0.6,
+          'best': double.nan,
+          'bestDb': double.nan,
+          'message': message,
+        };
+
+    test('parses progress, with untested levels as NaN', () {
+      final t = TuneEvent(event('running'));
+      expect(t.running, isTrue);
+      expect(t.clarity[1], 8.5);
+      expect(t.clarity[2].isNaN, isTrue);
+      expect(t.clipped[1], isTrue);
+    });
+
+    test('formats clarity', () {
+      expect(formatDb(14.2), '+14 dB');
+      expect(formatDb(double.nan), '–');
+    });
+
+    Widget panel(TuneEvent? t) => MaterialApp(
+          home: Scaffold(
+            body: SoundPanel(
+              palette: SightPalette.radar,
+              loudness: 0.6,
+              clarityDb: 12,
+              tune: t,
+              onLoudness: (_) {},
+              onAutoTune: () {},
+              onCancel: () {},
+            ),
+          ),
+        );
+
+    testWidgets('idle: slider, clarity and AUTO-TUNE', (tester) async {
+      await tester.pumpWidget(panel(null));
+      expect(find.byType(Slider), findsOneWidget);
+      expect(find.text('60%'), findsOneWidget);
+      expect(find.text('AUTO-TUNE'), findsOneWidget);
+    });
+
+    testWidgets('running: progress and cancel, no slider', (tester) async {
+      await tester.pumpWidget(panel(TuneEvent(event('running'))));
+      expect(find.byType(Slider), findsNothing);
+      expect(find.text('CANCEL'), findsOneWidget);
+      expect(find.textContaining('TESTING 60% · 3/5'), findsOneWidget);
+    });
+
+    testWidgets('failed: says why', (tester) async {
+      await tester.pumpWidget(panel(TuneEvent(event('failed', message: 'No clear echo.'))));
+      expect(find.textContaining('No clear echo.'), findsOneWidget);
+    });
   });
 }

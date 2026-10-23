@@ -72,6 +72,9 @@ class SonarStats {
         volume = (m['volume'] as num?)?.toDouble() ?? 0,
         calibration = m['calibration'] as String? ?? 'none',
         directDb = (m['directDb'] as num?)?.toDouble() ?? double.nan,
+        loudness = (m['loudness'] as num?)?.toDouble() ?? kDefaultLoudness,
+        clarityDb = (m['clarityDb'] as num?)?.toDouble() ?? double.nan,
+        tuning = m['tuning'] as bool? ?? false,
         brain = m['brain'] as String? ?? '';
 
   final bool running;
@@ -94,7 +97,60 @@ class SonarStats {
   /// Speaker->mic loudness relative to calibration, in dB (NaN until calibrated). Strongly
   /// negative means the speaker or mic is probably covered.
   final double directDb;
+
+  /// Chirp loudness, 0.2..1 of full scale (on top of the media volume).
+  final double loudness;
+
+  /// How far the strongest echo stands out of the noise, in dB (NaN until heard).
+  final double clarityDb;
+
+  /// AUTO-TUNE is running.
+  final bool tuning;
   final String brain;
+}
+
+/// Must match SonarConfig.kt.
+const double kDefaultLoudness = 0.6;
+const double kMinLoudness = 0.2;
+const double kMaxLoudness = 1.0;
+
+/// AUTO-TUNE progress or result, from SonarEngine.
+class TuneEvent {
+  TuneEvent(Map<Object?, Object?> m)
+      : state = m['state'] as String? ?? 'running',
+        phase = m['phase'] as String? ?? '',
+        progress = (m['progress'] as num?)?.toDouble() ?? 0,
+        levels = [for (final v in m['levels'] as List<Object?>? ?? const []) (v! as num).toDouble()],
+        clarity = [for (final v in m['clarity'] as List<Object?>? ?? const []) (v as num?)?.toDouble() ?? double.nan],
+        clipped = (m['clipped'] as List<Object?>? ?? const []).cast<bool>(),
+        testing = (m['testing'] as num?)?.toDouble() ?? kDefaultLoudness,
+        best = (m['best'] as num?)?.toDouble() ?? double.nan,
+        bestDb = (m['bestDb'] as num?)?.toDouble() ?? double.nan,
+        message = m['message'] as String? ?? '';
+
+  /// running, done, failed or cancelled.
+  final String state;
+
+  /// settle, measure, final_settle or calibrate.
+  final String phase;
+  final double progress;
+
+  /// Loudness levels tried, and the echo clarity (dB, NaN = not yet) and clipping at each.
+  final List<double> levels;
+  final List<double> clarity;
+  final List<bool> clipped;
+
+  /// Loudness being played right now.
+  final double testing;
+
+  /// The chosen loudness and its clarity (NaN until chosen).
+  final double best;
+  final double bestDb;
+
+  /// Why it failed, in plain words.
+  final String message;
+
+  bool get running => state == 'running';
 }
 
 class SonarStatus {
@@ -172,6 +228,8 @@ class SonarChannel {
 
   Stream<SonarStats> get stats => _raw.where((m) => m['type'] == 'stats').map(SonarStats.new);
 
+  Stream<TuneEvent> get tune => _raw.where((m) => m['type'] == 'tune').map(TuneEvent.new);
+
   Stream<String> get errors => _raw.where((m) => m['type'] == 'error').map((m) => m['message']! as String);
 
   Stream<double> get downloadProgress =>
@@ -195,6 +253,13 @@ class SonarChannel {
   Future<void> start() => _method.invokeMethod('start');
   /// Re-learn the speaker's own sound (~2 s). Hold the phone away from everything.
   Future<void> calibrate() => _method.invokeMethod('calibrate');
+
+  /// Chirp loudness, [kMinLoudness]..[kMaxLoudness]. Applied live and remembered.
+  Future<void> setLoudness(double v) => _method.invokeMethod('setLoudness', v);
+
+  /// AUTO-TUNE: tries several loudness levels against a wall and keeps the clearest (~10 s).
+  Future<void> autoTune() => _method.invokeMethod('autoTune');
+  Future<void> cancelTune() => _method.invokeMethod('cancelTune');
 
   /// FINISH LEARNING: stop the sonar and spend all the effort on the training queue.
   Future<void> finishLearning() => _method.invokeMethod('finishLearning');

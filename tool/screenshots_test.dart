@@ -18,6 +18,7 @@ import 'package:murdock/render/vision_renderer.dart';
 import 'package:murdock/render/vision_view.dart';
 import 'package:murdock/ui/grip.dart';
 import 'package:murdock/ui/hud.dart';
+import 'package:murdock/ui/sound_panel.dart';
 import 'package:murdock/sonar/sonar_channel.dart';
 import 'package:murdock/ui/guide.dart';
 
@@ -63,7 +64,7 @@ Float32List _profile(int t) {
   return p;
 }
 
-Map<String, Object> _stats({bool broken = false}) => {
+Map<String, Object> _stats({bool broken = false, bool tuned = false}) => {
       'type': 'stats',
       'running': true,
       'speaker': 'playing',
@@ -77,9 +78,28 @@ Map<String, Object> _stats({bool broken = false}) => {
       'brain': 'ready',
       'calibration': 'saved',
       'directDb': -1.5,
+      'loudness': tuned ? 0.8 : 0.6,
+      'clarityDb': broken ? double.nan : 14.0,
+      'tuning': false,
     };
 
-void _mockNative({required int samples, bool broken = false, double tilt = 35, bool assist = false, int pending = 0}) {
+/// AUTO-TUNE part-way through: three of five loudness levels measured.
+Map<String, Object> _tuneEvent({required bool done}) => {
+      'type': 'tune',
+      'state': done ? 'done' : 'running',
+      'phase': done ? 'calibrate' : 'measure',
+      'progress': done ? 1.0 : 0.52,
+      'levels': [0.3, 0.45, 0.6, 0.8, 1.0],
+      'clarity': done ? [9.0, 13.5, 15.2, 17.1, 16.8] : [9.0, 13.5, 15.2, double.nan, double.nan],
+      'clipped': [false, false, false, false, false],
+      'testing': 0.8,
+      'best': done ? 0.8 : double.nan,
+      'bestDb': done ? 17.1 : double.nan,
+      'message': '',
+    };
+
+void _mockNative(
+    {required int samples, bool broken = false, double tilt = 35, bool assist = false, int pending = 0, bool? tuneDone}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   var finishing = false; // flips when the app starts FINISH LEARNING
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
@@ -109,8 +129,9 @@ void _mockNative({required int samples, bool broken = false, double tilt = 35, b
   messenger.setMockStreamHandler(
     _events,
     MockStreamHandler.inline(onListen: (args, sink) {
-      sink.success(_stats(broken: broken));
+      sink.success(_stats(broken: broken, tuned: tuneDone ?? false));
       sink.success({'type': 'pose', 'tilt': tilt, 'roll': 2.0});
+      if (tuneDone != null) sink.success(_tuneEvent(done: tuneDone));
       if (broken) return;
       for (var t = 0; t < 40; t++) {
         sink.success({'type': 'ping', 'profile': _profile(t), 'clean': _profile(t), 'direct': 3.2});
@@ -132,7 +153,7 @@ void main() {
 
   Future<void> shoot(WidgetTester tester, String name,
       {required int samples, String? tab, bool broken = false, double tilt = 35, bool assist = false, int pending = 0,
-      String? tapAfter}) async {
+      String? tapAfter, bool? tuneDone}) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
     // A real phone's system bars: status bar on top, 3-button navigation at the bottom.
@@ -140,7 +161,7 @@ void main() {
     const bars = FakeViewPadding(top: 24 * 2.75, bottom: 48 * 2.75);
     tester.view.padding = bars;
     tester.view.viewPadding = bars;
-    _mockNative(samples: samples, broken: broken, tilt: tilt, assist: assist, pending: pending);
+    _mockNative(samples: samples, broken: broken, tilt: tilt, assist: assist, pending: pending, tuneDone: tuneDone);
     await tester.pumpWidget(const MurdockApp());
     await _settle(tester);
     if (tab != null) {
@@ -163,7 +184,12 @@ void main() {
     final nav = tester.getRect(find.ancestor(of: find.text('RADAR'), matching: find.byType(HudPanel)).first);
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
     expect(nav.bottom, lessThanOrEqualTo(screen.height - 48 + 0.5), reason: 'tab bar under the system bar');
-    for (final f in [find.byType(GripBadge), find.text('RECALIBRATE SPEAKER'), find.text('CAMERA VIEW')]) {
+    for (final f in [
+      find.byType(GripBadge),
+      find.byType(SoundPanel),
+      find.byType(GlowButton),
+      find.text('CAMERA VIEW'),
+    ]) {
       for (final e in f.evaluate()) {
         final r = tester.getRect(find.byWidget(e.widget));
         expect(r.bottom, lessThanOrEqualTo(nav.top + 0.5), reason: '${e.widget.runtimeType} overlaps the tab bar');
@@ -173,6 +199,8 @@ void main() {
   }
 
   testWidgets('radar', (t) => shoot(t, 'radar', samples: 0, tab: 'RADAR'));
+  testWidgets('radar (auto-tune running)', (t) => shoot(t, 'radar_tuning', samples: 0, tab: 'RADAR', tuneDone: false));
+  testWidgets('radar (auto-tuned)', (t) => shoot(t, 'radar_tuned', samples: 0, tab: 'RADAR', tuneDone: true));
   testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true, tab: 'RADAR'));
   testWidgets('see (untrained, top leaning toward you)', (t) => shoot(t, 'see_untrained', samples: 0, tilt: -15));
   testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400));

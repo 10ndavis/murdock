@@ -22,9 +22,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Bridges the native sonar + models to Flutter.
  *   MethodChannel "murdock/sonar": requestPermission, start, stop, teach, setTraining, save,
- *                                  reset, teacherReady, downloadTeacher, status
+ *                                  reset, teacherReady, downloadTeacher, status,
+ *                                  setLoudness, autoTune, cancelTune
  *   EventChannel  "murdock/frames": one map per ping {profile, depth?, direct, ...},
- *                                   download progress, and {type: "error"} reports
+ *                                   download progress, AUTO-TUNE progress ({type: "tune"})
+ *                                   and {type: "error"} reports
  *
  * The echo AI and its trainer live in [BrainHost] (process-wide, shared with the background
  * [LearningService]); this activity only borrows them. The camera teacher has its own
@@ -71,13 +73,21 @@ class MainActivity : FlutterActivity() {
                         val b = brain
                         val state = if (b != null && BrainHost.state == "ready" && b.health != "ok") b.health else BrainHost.state
                         emit(stats + ("type" to "stats") + ("brain" to state))
-                    }
+                    }.also(::setUpSound)
                 }
                 sonar!!.start()
                 result.success(null)
             }
             "stop" -> { sonar?.stop(); result.success(null) }
             "calibrate" -> { sonar?.calibrate(); result.success(null) }
+            "setLoudness" -> {
+                val v = (call.arguments as Number).toFloat()
+                sonar?.loudness = v
+                prefs.edit().putFloat(LOUDNESS, v).apply()
+                result.success(null)
+            }
+            "autoTune" -> { sonar?.autoTune(); result.success(sonar != null) }
+            "cancelTune" -> { sonar?.cancelTune(); result.success(null) }
             "finishLearning" -> {
                 // Stop listening (no new samples, no inference) and train flat out in a
                 // foreground service, which keeps going if the app is closed.
@@ -189,8 +199,18 @@ class MainActivity : FlutterActivity() {
         submit(teacherThread, "teacher", result) {
             val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
             val depth = t.run(rgb)
-            if (learn) submitBrain("training") { brain?.addSample(stack, pose, depth, tilt) }
+            // No samples while the speaker filter is relearned: those echoes aren't clean.
+            if (learn && sonar?.busy != true) submitBrain("training") { brain?.addSample(stack, pose, depth, tilt) }
             reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
+        }
+    }
+
+    /** Saved loudness, and AUTO-TUNE progress to Dart (a finished tune's loudness is saved). */
+    private fun setUpSound(engine: SonarEngine) {
+        engine.loudness = prefs.getFloat(LOUDNESS, SonarConfig.CHIRP_AMPLITUDE)
+        engine.onTune = { event ->
+            if (event["state"] == "done") prefs.edit().putFloat(LOUDNESS, engine.loudness).apply()
+            emit(event)
         }
     }
 
@@ -308,5 +328,6 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "Murdock"
         private const val PERMISSION_REQUEST_BASE = 4100
+        private const val LOUDNESS = "loudness"
     }
 }

@@ -15,6 +15,7 @@ import 'train/camera_teacher.dart';
 import 'ui/grip.dart';
 import 'ui/guide.dart';
 import 'ui/hud.dart';
+import 'ui/sound_panel.dart';
 import 'ui/system_check.dart';
 
 enum Mode { see, radar }
@@ -75,6 +76,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   double _tilt = kIdealTilt;
   double _roll = 0;
 
+  // Sound: loudness slider (null = follow the engine) and AUTO-TUNE progress/result.
+  double? _loudness;
+  TuneEvent? _tune;
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +98,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _subs.add(_sonar.stats.listen((s) => setState(() {
           _stats = s;
           if (s.pingsPerSec == 0) _signal = 0;
+        })));
+    _subs.add(_sonar.tune.listen((t) => setState(() {
+          _tune = t;
+          if (t.state == 'done') _loudness = null; // the slider follows the tuned loudness
         })));
     _subs.add(_sonar.downloadProgress.listen((p) => setState(() => _download = p)));
     // Errors land in the System Check panel; only a new kind of error pops a message.
@@ -698,9 +707,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 8),
           _grip(),
           const SizedBox(height: 8),
+          _soundPanel(),
+          const SizedBox(height: 8),
           _calibrateButton(),
         ]),
       );
+
+  /// Chirp loudness + AUTO-TUNE.
+  Widget _soundPanel() => SoundPanel(
+        palette: _palette,
+        loudness: _loudness ?? _stats?.loudness ?? kDefaultLoudness,
+        clarityDb: _stats?.clarityDb ?? double.nan,
+        tune: _tune,
+        onLoudness: (v) {
+          setState(() => _loudness = v);
+          _sonar.setLoudness(v);
+        },
+        onAutoTune: _startAutoTune,
+        onCancel: _sonar.cancelTune,
+      );
+
+  Future<void> _startAutoTune() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF0B0D14),
+        title: Text('AUTO-TUNE', style: Hud.label(_palette.accent, size: 13)),
+        content: const Text(
+          'Murdock tries 5 chirp loudness levels and keeps the one whose echo comes back clearest on '
+          'your phone. Then it relearns the speaker\'s own sound at that loudness.\n\n'
+          'Stand 4–6 ft from a flat wall and aim the top edge (the speaker) at it. Keep still for '
+          'about 10 seconds, with nothing else within 3 ft of the phone.',
+          style: Hud.body,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('START')),
+        ],
+      ),
+    );
+    if (go != true) return;
+    setState(() => _loudness = null);
+    await _sonar.autoTune();
+  }
 
   /// Live GRIP coaching: physics (covered, sideways, flat, aimed at you) and, in SEE, whether
   /// the echo AI has learned at the current angle yet.
@@ -722,9 +771,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// Re-learn the speaker's own sound so it can be filtered out of the echoes.
   Widget _calibrateButton() {
-    final busy = _stats?.calibration == 'calibrating';
+    final busy = _stats?.calibration == 'calibrating' || (_tune?.running ?? false);
     return GlowButton(
-      label: busy ? 'LEARNING SPEAKER SOUND…' : 'RECALIBRATE SPEAKER',
+      label: (_tune?.running ?? false) ? 'AUTO-TUNING…' : busy ? 'LEARNING SPEAKER SOUND…' : 'RECALIBRATE SPEAKER',
       icon: Icons.tune,
       palette: _palette,
       onTap: busy

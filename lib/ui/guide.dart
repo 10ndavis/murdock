@@ -45,6 +45,9 @@ const _steps = [
           'a bump appears at about 2 ft. Step back and it slides right. That bump is the echo.\n\n'
           'The first time, Murdock spends 2 seconds learning the sound that goes straight from your '
           'speaker to your mic, so it can filter it out. If it ever looks wrong, tap RECALIBRATE SPEAKER.\n\n'
+          'Then tap AUTO-TUNE, standing 4-6 ft from a wall: it tries several chirp loudness levels and '
+          'keeps the one your phone hears best. You can also drag LOUDNESS yourself and watch ECHO CLARITY '
+          '(higher is better).\n\n'
           'If the ECHO meter at the top stays empty, your phone\'s speaker or mic can\'t do high '
           'frequencies and the rest of the app won\'t work well.'),
   _Step(Icons.school, 'STEP 2 · LEARN', 'Let it learn with the lights on',
