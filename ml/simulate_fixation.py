@@ -94,5 +94,7 @@ def run(policy, n_varied=300, n_fixed=1500, seed=0):
     report(f'after staring ({kept} kept)')
 
 
+# Optional 5th arg: varied samples taught before staring (fewer = the box dominates).
+N_VARIED = int(sys.argv[4]) if len(sys.argv) > 4 else 300
 for policy in ['current', 'gated']:
-    run(policy)
+    run(policy, n_varied=N_VARIED)
