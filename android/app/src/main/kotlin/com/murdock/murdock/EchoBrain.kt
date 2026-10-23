@@ -39,16 +39,26 @@ class EchoBrain(
 
     private val metaFile get() = File(weightsFile.path + ".meta")
 
+    /** Identifies the shipped model, so learning saved on top of an older model is dropped. */
+    private val modelId: Long by lazy {
+        java.util.zip.CRC32().apply { update(modelBytes.duplicate().apply { rewind() }) }.value
+    }
+
     private fun open(): Interpreter {
         modelBytes.rewind()
         val it = Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
-        if (weightsFile.exists()) {
+        // meta: "<steps> <samples> <modelId>". A head trained on another model's trunk features
+        // would produce garbage, so after an app update with a new model we start fresh.
+        val meta = metaFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")
+        val sameModel = meta != null && meta.size >= 3 && meta[2].toLongOrNull() == modelId
+        if (weightsFile.exists() && sameModel) {
             try {
                 restore(it)
-                metaFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")?.let { (steps, samples) ->
-                    trainedSteps = steps.toInt(); totalSamples = samples.toInt()
-                }
+                trainedSteps = meta!![0].toInt(); totalSamples = meta[1].toInt()
             } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
+        } else if (weightsFile.exists()) {
+            Log.i(TAG, "model changed; discarding on-device learning from the previous model")
+            weightsFile.delete(); metaFile.delete()
         }
         return it
     }
@@ -113,7 +123,7 @@ class EchoBrain(
             }
         }
         tmp.renameTo(weightsFile) // atomic: a crash mid-save can't leave a corrupt file
-        metaFile.writeText("$trainedSteps $totalSamples")
+        metaFile.writeText("$trainedSteps $totalSamples $modelId")
         sampleOut?.flush()
     }
 
