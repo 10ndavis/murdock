@@ -3,12 +3,12 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'render/fusion.dart';
 import 'render/palette.dart';
 import 'render/scope_view.dart';
-import 'render/shape_overlay.dart';
 import 'render/shapes.dart';
 import 'render/vision_renderer.dart';
 import 'render/vision_view.dart';
@@ -44,10 +44,9 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _sonar = SonarChannel();
   final _vision = VisionRenderer();
-  // Scene shapes (floor, walls, obstacles) drawn as wireframe over the echo picture.
+  // Scene shapes (floor, walls, obstacles), drawn into the echo picture once it is sure of them.
   final _shapes = ShapeTracker();
   Float32List? _teacherShapes;
-  double? _echoFeet;
   final _camera = CameraTeacher();
   final List<StreamSubscription<Object?>> _subs = [];
 
@@ -92,14 +91,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _subs.add(_sonar.frames.listen((f) {
       _signal = _signal * 0.9 + f.signal * 0.1;
-      _echoFeet = nearestEchoFeet(f.clean);
     }));
     _subs.add(_sonar.brain.listen((b) {
       _samples = b.samples;
       _lastBrainAt = DateTime.now();
-      _vision.update(_fuse(b.depth));
       final shapes = cleanShapes(b.shapes);
       if (shapes != null) _shapes.update(fuseShapes(shapes, _teacherShapes, _assistLevel));
+      // Shapes it is sure of are drawn into the echo picture itself (same laser look).
+      _vision.update(paintShapes(_fuse(b.depth), _shapes));
     }));
     _subs.add(_sonar.pose.listen((p) => setState(() {
           _tilt = p.tilt;
@@ -131,6 +130,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final s = await _sonar.status();
     if (mounted) setState(() => _status = s);
+    final crash = await _sonar.lastCrash();
+    if (crash != null && mounted) await _showCrash(crash);
     // Reopened while FINISH LEARNING is still running in the background: show its progress
     // instead of starting the sonar.
     if (s.finishing) {
@@ -436,7 +437,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       title = 'SEE · SOUND ONLY';
       body = untaught
           ? 'Generic BatVision head start until it learns your rooms. Turn on camera assist to teach it.'
-          : 'Brighter = closer; outlines = floor, walls and obstacles it recognises. Move slowly.';
+          : 'Brighter = closer. Floor, walls and obstacles sharpen once it is sure of them. Move slowly.';
     } else if (_cameraLuma < kAssistLuma) {
       title = 'SEE · SOUND ONLY · TOO DARK FOR CAMERA';
       body = 'The picture comes from echoes alone. Brighter = closer.';
@@ -461,7 +462,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               )
             : Stack(fit: StackFit.expand, children: [
                 VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…'),
-                if (_vision.hasMap) ShapeOverlay(tracker: _shapes, palette: _palette, feet: () => _echoFeet),
               ]),
       ),
       _hint(title, body),
@@ -741,6 +741,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         },
         onAutoTune: _startAutoTune,
         onCancel: _sonar.cancelTune,
+      );
+
+  /// The last session ended in a crash: say so, and let the user copy the details for us.
+  Future<void> _showCrash(String details) => showDialog<void>(
+        context: context,
+        builder: (c) => AlertDialog(
+          backgroundColor: const Color(0xFF0B0D14),
+          title: Text('MURDOCK CLOSED UNEXPECTEDLY', style: Hud.label(_palette.hot, size: 13)),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Your learning was saved. Tap COPY and paste this to the developer so it can be fixed:',
+                  style: Hud.body),
+              const SizedBox(height: 10),
+              SelectableText(details,
+                  style: const TextStyle(color: Hud.dim, fontSize: 11, fontFamily: 'monospace', height: 1.35)),
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: details));
+                _toast('Copied');
+              },
+              child: const Text('COPY'),
+            ),
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text('OK')),
+          ],
+        ),
       );
 
   Future<void> _startAutoTune() async {

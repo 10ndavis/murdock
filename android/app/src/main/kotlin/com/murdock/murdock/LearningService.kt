@@ -33,6 +33,7 @@ class LearningService : Service() {
             stopLearning(finished = false)
             return START_NOT_STICKY
         }
+        CrashLog.install(this)
         createChannel()
         val notification = progressNotification(pending = null)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

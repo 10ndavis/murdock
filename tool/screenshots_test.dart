@@ -139,7 +139,7 @@ void _mockNative(
       sink.success({'type': 'pose', 'tilt': tilt, 'roll': 2.0});
       if (tuneDone != null) sink.success(_tuneEvent(done: tuneDone));
       if (broken) return;
-      for (var t = 0; t < 40; t++) {
+      for (var t = 0; t < 90; t++) { // long enough for steady shapes to be drawn
         sink.success({'type': 'ping', 'profile': _profile(t), 'clean': _profile(t), 'direct': 3.2});
         sink.success({
           'type': 'brain',

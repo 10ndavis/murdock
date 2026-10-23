@@ -282,6 +282,15 @@ class SonarChannel {
   Future<bool> teacherReady() async => await _method.invokeMethod<bool>('teacherReady') ?? false;
   Future<void> downloadTeacher() => _method.invokeMethod('downloadTeacher');
 
+  /// Why the app last ended abnormally (crash, freeze, out of memory), once; null if it didn't.
+  Future<String?> lastCrash() async {
+    try {
+      return await _method.invokeMethod<String>('lastCrash');
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<SonarStatus> status() async =>
       SonarStatus((await _method.invokeMethod<Map<Object?, Object?>>('status'))!);
 

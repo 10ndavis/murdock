@@ -13,6 +13,8 @@ Float32List _shapes({double box1x = 0.3, double box2x = 0.7}) {
   s[kBoxes + 1] = 0.8;
   s[kBoxes + 2] = box1x;
   s[kBoxes + 3] = 0.5;
+  s[kBoxes + 4] = 0.2;
+  s[kBoxes + 5] = 0.3;
   s[kBoxes + 6] = 1;
   s[kBoxes + 7] = 0.6;
   s[kBoxes + 8] = box2x;
@@ -49,21 +51,38 @@ void main() {
     expect(identical(fuseShapes(echo, null, 1), echo), isTrue);
   });
 
-  test('nearest echo distance in feet', () {
-    final clean = Float32List(kRangeBins * kChannels)..fillRange(0, kRangeBins * kChannels, 0.2);
-    expect(nearestEchoFeet(clean), isNull); // nothing stands out
-    for (final (bin, v) in [(30, 0.9), (60, 0.95)]) {
-      clean[bin * 2] = v;
-      clean[bin * 2 + 1] = v;
+  test('a shape is only drawn after it has been reported steadily', () {
+    final depth = Float32List(kDepthSize * kDepthSize);
+    final tracker = ShapeTracker()..update(_shapes());
+    // One confident report is not enough: the picture is untouched.
+    expect(identical(paintShapes(depth, tracker), depth), isTrue);
+    for (var i = 0; i < 80; i++) {
+      tracker.update(_shapes());
     }
-    // The first echo within ~6 dB of the strongest one: bin 30.
-    expect(nearestEchoFeet(clean), closeTo(30 * kFeetPerBin, 1e-9));
+    final painted = paintShapes(depth, tracker);
+    expect(identical(painted, depth), isFalse);
+    // Obstacle 1 at x 0.3, y 0.5 (nearness 0.8) now shows, but never fully.
+    final at = (kDepthSize ~/ 2) * kDepthSize + (0.3 * kDepthSize).round();
+    expect(painted[at], greaterThan(0.3));
+    expect(painted[at], lessThanOrEqualTo(0.8 * kShapeShare + 1e-6));
   });
 
-  test('nearest shape prefers a present obstacle', () {
+  test('a flickering shape never builds confidence', () {
+    final depth = Float32List(kDepthSize * kDepthSize);
+    final tracker = ShapeTracker();
+    for (var i = 0; i < 200; i++) {
+      tracker.update(i.isEven ? _shapes() : Float32List(kShapeDim));
+    }
+    for (var k = 0; k < kShapeSlots; k++) {
+      expect(tracker.strength(k), 0);
+    }
+    expect(identical(paintShapes(depth, tracker), depth), isTrue);
+  });
+
+  test('scene shapes layout', () {
     final s = SceneShapes(_shapes());
-    expect(s.nearest!.cx, closeTo(0.3, 1e-6));
     expect(s.floor.horizon, closeTo(0.5, 1e-6));
     expect(s.walls.length, 3);
+    expect(s.boxes.first.cx, closeTo(0.3, 1e-6));
   });
 }

@@ -50,6 +50,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        CrashLog.install(this)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
         EventChannel(messenger, "murdock/frames").setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink) { sink = events }
@@ -121,6 +122,7 @@ class MainActivity : FlutterActivity() {
                     "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))
             }
+            "lastCrash" -> result.success(try { CrashLog.takeLast(this) } catch (t: Throwable) { null })
             "requestPermission" -> requestPermission(call.arguments as String, result)
             // Kept for older Dart code: training is continuous now, driven by new samples.
             "setTraining" -> result.success(null)
