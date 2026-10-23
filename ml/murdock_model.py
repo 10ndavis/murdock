@@ -53,7 +53,9 @@ def build_trunk() -> tf.keras.Model:
     x = L.Conv2D(128, (3, 3), strides=(2, 2), padding="same", activation="relu")(x)    # 4x16
     x = L.Conv2D(128, (3, 3), strides=(2, 2), padding="same", activation="relu")(x)    # 2x8
     x = L.Flatten()(x)
+    x = L.Dropout(0.3)(x)
     x = L.Dense(LATENT, activation="relu", name="latent")(x)
+    x = L.Dropout(0.3)(x)
     return tf.keras.Model(inp, x, name="trunk")
 
 

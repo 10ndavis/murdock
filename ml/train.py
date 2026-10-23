@@ -18,6 +18,25 @@ from dataset import load_dir
 from murdock_model import build_student, depth_loss
 
 
+def augment(echo, depth):
+    """Label-preserving variations so the model learns echo patterns, not rooms.
+
+    echo: [STACK, RANGE_BINS, 2] log-scaled; depth: [D, D] nearness.
+    """
+    # Mirror the world: swap left/right mics and flip the depth map horizontally.
+    if tf.random.uniform([]) < 0.5:
+        echo = echo[..., ::-1]
+        depth = depth[:, ::-1]
+    # Overall loudness (log domain) and per-mic imbalance.
+    echo = echo + tf.random.uniform([], -0.06, 0.06) + tf.random.uniform([1, 1, 2], -0.02, 0.02)
+    # Background noise.
+    echo = echo + tf.random.normal(tf.shape(echo), stddev=0.02)
+    # +-1 range bin of alignment jitter.
+    shift = tf.random.uniform([], -1, 2, dtype=tf.int32)
+    echo = tf.roll(echo, shift, axis=1)
+    return tf.clip_by_value(echo, 0.0, 1.0), depth
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", required=True)
@@ -27,6 +46,7 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--pretrained")
     ap.add_argument("--out", default="student.weights.h5")
+    ap.add_argument("--no-augment", action="store_true")
     args = ap.parse_args()
 
     def load(dirs):
@@ -46,10 +66,14 @@ def main():
     if args.pretrained:
         model.load_weights(args.pretrained)
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr), loss=depth_loss)
+    ds = tf.data.Dataset.from_tensor_slices(train).shuffle(min(len(train[0]), 50000))
+    if not args.no_augment:
+        ds = ds.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(args.batch).prefetch(tf.data.AUTOTUNE)
     model.fit(
-        *train,
+        ds,
         validation_data=val,
-        epochs=args.epochs, batch_size=args.batch, shuffle=True,
+        epochs=args.epochs,
         callbacks=[
             tf.keras.callbacks.ModelCheckpoint(args.out, save_best_only=True, save_weights_only=True),
             tf.keras.callbacks.ReduceLROnPlateau(patience=4),

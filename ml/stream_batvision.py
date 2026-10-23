@@ -7,6 +7,12 @@ train/val/test CSVs are used afterwards to pair them.
 
   python stream_batvision.py fetch --out data/bv --parts 0 1 2 3 4   # resumable, per part
   python stream_batvision.py join  --out data/bv                     # -> data/bv/{train,val,test}.mdk
+
+Alignment: each recording must be lined up on the moment the chirp leaves the speaker. In
+the phone's 17.5-21.5 kHz band BatVision's direct sound is often weaker than a nearby echo,
+so "loudest peak" mis-aligns ~half of BV1. Instead, fetch keeps the first RAW_KEEP samples
+of every recording (48 kHz, float16), and join aligns every recording of a session (a BV1
+day or BV2 location) at that session's most common peak position.
 """
 
 import argparse
@@ -24,11 +30,13 @@ from scipy.io import wavfile
 from dataset import write
 from murdock_model import STACK
 from prepare_batvision import BATVISION_RATE, _resample, depth_to_nearness
-from features import ping_features
+from features import envelope, profile
 
 API = "https://entrepot.recherche.data.gouv.fr/api/access/datafile/"
 PART_IDS = [627779, 627781, 627782, 627790, 627791]   # Batvision_Dataset-{0..4}.tar.gz
 SEARCH = 2000
+LOCK = 12                  # samples either side of the session offset to look for the peak
+RAW_KEEP = 6000            # 125 ms at 48 kHz: covers the direct sound plus RANGE_SAMPLES
 
 
 class RangeStream(io.RawIOBase):
@@ -87,7 +95,7 @@ def fetch_part(part, out):
         pos, size = stream.raw.pos, stream.raw.size or 0
         print(f"part {part}: archive ended early at {pos / 1e9:.2f}/{size / 1e9:.2f} GB ({e}); "
               f"keeping {len(feats)} echoes, {len(depths)} depth maps", flush=True)
-    np.savez(os.path.join(out, f"part{part}_echo.npz"), **{k.replace("/", "|"): v for k, v in feats.items()})
+    np.savez(os.path.join(out, f"part{part}_audio.npz"), **{k.replace("/", "|"): v for k, v in feats.items()})
     np.savez(os.path.join(out, f"part{part}_depth.npz"), **{k.replace("/", "|"): v for k, v in depths.items()})
     open(done_flag, "w").close()
     print(f"part {part}: done, {len(feats)} echoes, {len(depths)} depth maps, {len(pending)} unpaired ears")
@@ -109,14 +117,14 @@ def _scan(tar_stream, part, out, feats, depths, pending, start):
                 elif "/audio" in name and name.endswith((".npy", ".wav")):
                     data = tar.extractfile(m).read()
                     if name.endswith(".wav"):                      # BV2: binaural wav
-                        feats[name] = ping_features(_audio_wav(data), search=SEARCH)
+                        feats[name] = _keep(_audio_wav(data))
                     else:                                         # BV1: one .npy per ear
                         key, side = name.rsplit("_", 1)
                         half = pending.setdefault(key, {})
                         half[side] = np.load(io.BytesIO(data)).astype(np.float32).ravel()
                         if len(half) == 2:
                             x = np.stack([half["left.npy"], half["right.npy"]], axis=1)
-                            feats[key + "_left.npy"] = ping_features(_resample(x, BATVISION_RATE), search=SEARCH)
+                            feats[key + "_left.npy"] = _keep(_resample(x, BATVISION_RATE))
                             del pending[key]
                 elif name.endswith(".npy"):                       # every other .npy is a depth map
                     d = np.load(io.BytesIO(tar.extractfile(m).read()))
@@ -129,6 +137,48 @@ def _scan(tar_stream, part, out, feats, depths, pending, start):
                       f"{len(feats)} echoes, {len(depths)} depth maps", flush=True)
 
 
+def _keep(x):
+    """First RAW_KEEP stereo samples at 48 kHz as float16 (zero-padded if shorter)."""
+    if x.ndim == 1:
+        x = np.stack([x, x], axis=1)
+    x = x[:RAW_KEEP, :2]
+    if len(x) < RAW_KEEP:
+        x = np.pad(x, ((0, RAW_KEEP - len(x)), (0, 0)))
+    return x.astype(np.float16)
+
+
+def _session(key):
+    """BV1 recording day or BV2 location: recordings that share one speaker/mic timing."""
+    return "/".join(key.split("/")[:2])
+
+
+def align_features(audio):
+    """Echo features for every recording, aligned per session at its most common peak."""
+    peaks = {k: int(np.argmax(envelope(a[:, 0].astype(np.float32))[:SEARCH])) for k, a in audio.items()}
+    by_session = {}
+    for k, p in peaks.items():
+        by_session.setdefault(_session(k), []).append(p)
+    offsets = {}
+    for sess, ps in sorted(by_session.items()):
+        ps = np.array(ps)
+        mode = int(np.bincount(ps).argmax())
+        # Refine: median of the peaks that agree with the mode, to centre the jitter.
+        near = ps[np.abs(ps - mode) <= 12]
+        offsets[sess] = int(np.median(near))
+        print(f"  {sess:45s} n={len(ps):5d} offset={offsets[sess]:5d}  "
+              f"agree(±12)={len(near) / len(ps):.0%}")
+    feats = {}
+    for k, a in audio.items():
+        x = a.astype(np.float32)
+        envs = [envelope(x[:, c]) for c in range(2)]
+        # Lock onto the local peak near the session offset (absorbs a few samples of jitter,
+        # like the phone's per-ping re-lock), never onto a far-off echo.
+        lo = max(offsets[_session(k)] - LOCK, 0)
+        direct = lo + int(np.argmax(envs[0][lo:offsets[_session(k)] + LOCK + 1]))
+        feats[k] = np.stack([profile(e, direct) for e in envs], axis=-1)
+    return feats
+
+
 def _load_all(out, kind):
     table = {}
     for f in sorted(os.listdir(out)):
@@ -139,7 +189,8 @@ def _load_all(out, kind):
 
 
 def join(out):
-    echoes, depths = _load_all(out, "echo"), _load_all(out, "depth")
+    print("aligning recordings per session:")
+    echoes, depths = align_features(_load_all(out, "audio")), _load_all(out, "depth")
     print(f"{len(echoes)} echoes, {len(depths)} depth maps")
     csv_root = os.path.join(out, "csv")
     for split in ("train", "val", "test"):
