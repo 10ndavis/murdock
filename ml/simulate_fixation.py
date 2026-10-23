@@ -19,6 +19,9 @@ STEPS_PER_SAMPLE = 20
 NEAR_DIST, NEAR_LIMIT = 0.035, 3   # must match EchoBrain.kt
 
 model, val = sys.argv[1], sys.argv[2]
+# "weak": echoes carry little scene information (heavy noise), as on a phone early on;
+# the AI then mostly predicts the average of what it was taught.
+WEAK = len(sys.argv) > 3 and sys.argv[3] == 'weak'
 REC = 16 * 128 * 2 + 32 * 32
 raw = np.fromfile(val, '<f4')
 raw = raw[: len(raw) // REC * REC].reshape(-1, REC)
@@ -40,14 +43,18 @@ def run(policy, n_varied=300, n_fixed=1500, seed=0):
     infer, train = it.get_signature_runner('infer'), it.get_signature_runner('train')
 
     def predict(ids):
-        return np.stack([infer(echo=echo[i:i + 1], pose=np.zeros((1, 2), np.float32))['depth'][0] for i in ids])
+        return np.stack([infer(echo=noisy[i:i + 1], pose=np.zeros((1, 2), np.float32))['depth'][0] for i in ids])
 
     def report(tag):
         p = predict(hold)
         l1 = np.abs(p - depth[hold]).mean()
         to_box = np.abs(p - depth[box]).mean()
-        print(f'  {policy:8s} {tag:22s} held-out L1 {l1:.4f}  distance to the box view {to_box:.4f}', flush=True)
+        print(f'  {"weak " if WEAK else ""}{policy:8s} {tag:22s} held-out L1 {l1:.4f}  distance to the box view {to_box:.4f}', flush=True)
 
+    if WEAK:
+        noisy = echo + rng.normal(0, 1.5, echo.shape).astype(np.float32) * echo.std()
+    else:
+        noisy = echo
     replay_e, replay_d, sigs = [], [], []
     budget = 0
 
@@ -73,15 +80,16 @@ def run(policy, n_varied=300, n_fixed=1500, seed=0):
 
     report('start')
     for i in varied:
-        add(echo[i], depth[i])
+        add(noisy[i], depth[i])
+    before = len(replay_e)
     spend()
     report(f'after {n_varied} varied')
     # Fixation: the same view, with camera-depth jitter and echo noise from hand shake.
     for _ in range(n_fixed):
-        e = echo[box] + rng.normal(0, 0.05, echo[box].shape).astype(np.float32) * echo[box].std()
+        e = noisy[box] + rng.normal(0, 0.05, echo[box].shape).astype(np.float32) * echo[box].std()
         d = np.clip(depth[box] + rng.normal(0, 0.015, depth[box].shape), 0, 1).astype(np.float32)
         add(e, d)
-    kept = len(replay_e) - n_varied
+    kept = len(replay_e) - before
     spend()
     report(f'after staring ({kept} kept)')
 
