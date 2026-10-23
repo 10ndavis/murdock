@@ -51,12 +51,6 @@ Float32List _room() {
   return d;
 }
 
-/// ml/shapes.py fit_shapes(_room()): floor, walls and the person as the nearest obstacle.
-final _roomShapes = Float32List.fromList([
-  0.643, 0.516, 0.719, 0.000, 0.375, 0.789, 0.358, 0.290, 0.408, 0.730, 0.179, 0.598, //
-  1.000, 0.800, 0.328, 0.484, 0.219, 0.531, 0.550, 0.250, 0.016, 0.250, 0.031, 0.500,
-]);
-
 Float32List _profile(int t) {
   final p = Float32List(kRangeBins * kChannels);
   for (var b = 0; b < kRangeBins; b++) {
@@ -139,12 +133,11 @@ void _mockNative(
       sink.success({'type': 'pose', 'tilt': tilt, 'roll': 2.0});
       if (tuneDone != null) sink.success(_tuneEvent(done: tuneDone));
       if (broken) return;
-      for (var t = 0; t < 90; t++) { // long enough for steady shapes to be drawn
+      for (var t = 0; t < 40; t++) {
         sink.success({'type': 'ping', 'profile': _profile(t), 'clean': _profile(t), 'direct': 3.2});
         sink.success({
           'type': 'brain',
           'depth': _room(),
-          'shapes': _roomShapes,
           'samples': samples,
           'steps': samples * 4,
           'loss': 0.1,

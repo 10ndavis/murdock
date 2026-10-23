@@ -203,8 +203,7 @@ class MainActivity : FlutterActivity() {
             val depth = t.run(rgb)
             // No samples while the speaker filter is relearned: those echoes aren't clean.
             if (learn && sonar?.busy != true) submitBrain("training") { brain?.addSample(stack, pose, depth, tilt) }
-            // The camera's own shapes too, so camera assist can sharpen the shape overlay.
-            reply(result, mapOf("depth" to depth, "shapes" to ShapeFit.fit(depth), "ms" to t.lastMs.toInt(), "backend" to t.backend))
+            reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
         }
     }
 
@@ -230,8 +229,6 @@ class MainActivity : FlutterActivity() {
                 emit(mapOf(
                     "type" to "brain",
                     "depth" to p.depth,
-                    "shapes" to p.shapes,
-                    "shapeLoss" to b.lastShapeLoss.toDouble(),
                     "steps" to b.trainedSteps,
                     "loss" to b.lastLoss.toDouble(),
                     "samples" to b.totalSamples,

@@ -9,7 +9,6 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'render/fusion.dart';
 import 'render/palette.dart';
 import 'render/scope_view.dart';
-import 'render/shapes.dart';
 import 'render/vision_renderer.dart';
 import 'render/vision_view.dart';
 import 'sonar/sonar_channel.dart';
@@ -44,9 +43,6 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _sonar = SonarChannel();
   final _vision = VisionRenderer();
-  // Scene shapes (floor, walls, obstacles), drawn into the echo picture once it is sure of them.
-  final _shapes = ShapeTracker();
-  Float32List? _teacherShapes;
   final _camera = CameraTeacher();
   final List<StreamSubscription<Object?>> _subs = [];
 
@@ -95,10 +91,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _subs.add(_sonar.brain.listen((b) {
       _samples = b.samples;
       _lastBrainAt = DateTime.now();
-      final shapes = cleanShapes(b.shapes);
-      if (shapes != null) _shapes.update(fuseShapes(shapes, _teacherShapes, _assistLevel));
-      // Shapes it is sure of are drawn into the echo picture itself (same laser look).
-      _vision.update(paintShapes(_fuse(b.depth), _shapes));
+      _vision.update(_fuse(b.depth));
     }));
     _subs.add(_sonar.pose.listen((p) => setState(() {
           _tilt = p.tilt;
@@ -234,7 +227,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _stopCamera() async {
     await _camera.stop();
     _teacherMap = null;
-    _teacherShapes = null;
     await _sonar.save();
   }
 
@@ -249,7 +241,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final learn = f.luma >= kLearnLuma;
     final r = await _sonar.teach(f.rgb, learn: learn);
     _teacherMap = softenCameraDepth(r.depth);
-    _teacherShapes = cleanShapes(r.shapes);
     _teacherAt = DateTime.now();
     _teacherMs = r.ms;
     _teacherBackend = r.backend;
@@ -437,7 +428,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       title = 'SEE · SOUND ONLY';
       body = untaught
           ? 'Generic BatVision head start until it learns your rooms. Turn on camera assist to teach it.'
-          : 'Brighter = closer. Floor, walls and obstacles sharpen once it is sure of them. Move slowly.';
+          : 'Brighter = closer. Move the phone slowly.';
     } else if (_cameraLuma < kAssistLuma) {
       title = 'SEE · SOUND ONLY · TOO DARK FOR CAMERA';
       body = 'The picture comes from echoes alone. Brighter = closer.';

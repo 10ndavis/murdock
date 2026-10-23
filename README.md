@@ -119,10 +119,10 @@ two-grip session on the phone runtime, the angle input cut held-out error from 0
 
 A second, small **shapes head** (`ml/shapes.py`) predicts a few scene primitives from the same
 latent and pose: the floor (horizon, nearness), wall panels to the left, ahead and right
-(nearness, slant), and the two nearest obstacles as boxes, each with a confidence. Only shapes
-reported steadily for about 2 seconds are used: SEE then paints them into the nearness map
-(`paintShapes` in `lib/render/shapes.dart`, at most 60% of a pixel), so the normal echo renderer
-draws them in the same laser look. The labels are fitted to the camera teacher's depth
+(nearness, slant), and the two nearest obstacles as boxes, each with a confidence. They are **not
+shown** in the app: on the phone they cluttered the picture without being accurate (on
+BatVision they beat a no-audio guess by only ~5%). The head still learns quietly alongside the
+depth head, so it can be revisited once there is far more data. The labels are fitted to the camera teacher's depth
 (`ShapeFit.kt`, a line-for-line copy of `shapes.py`; `ml/check_shapes_kotlin.py` checks they
 agree, to 3e-8 on 2,500 maps), so learning them needs no extra work from you and samples
 recorded before the shapes head get labels too. The depth head is untouched: same output and
