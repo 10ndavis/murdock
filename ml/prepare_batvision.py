@@ -60,8 +60,16 @@ def load_npy_pair(left, right):
 
 
 def load_depth(path):
-    d = np.squeeze(np.load(path).astype(np.float32)) / 1000.0     # mm -> m
+    return depth_to_nearness(np.load(path))
+
+
+def depth_to_nearness(depth_mm):
+    d = np.squeeze(depth_mm.astype(np.float32)) / 1000.0           # mm -> m
     d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+    # Centre square crop, matching the camera teacher's view in the app.
+    h, w = d.shape
+    s = min(h, w)
+    d = d[(h - s) // 2:(h - s) // 2 + s, (w - s) // 2:(w - s) // 2 + s]
     inv = np.where(d > 0.05, 1.0 / np.maximum(d, 0.05), 0.0)      # invalid -> far
     img = Image.fromarray(inv.astype(np.float32), mode="F").resize((DEPTH_SIZE, DEPTH_SIZE), Image.BOX)
     return normalize_nearness(np.asarray(img))
