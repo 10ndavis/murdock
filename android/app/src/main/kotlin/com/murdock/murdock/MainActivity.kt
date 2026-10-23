@@ -1,6 +1,10 @@
 package com.murdock.murdock
 
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -102,6 +106,12 @@ class MainActivity : FlutterActivity() {
             "setTraining" -> { training = call.arguments as Boolean; result.success(null) }
             "teacherReady" -> result.success(teacherFile.exists())
             "getFlag" -> result.success(prefs.getBoolean(call.arguments as String, false))
+            "getNumber" -> result.success(prefs.getFloat(call.arguments as String, Float.NaN).toDouble())
+            "setNumber" -> {
+                val (key, value) = call.arguments as List<*>
+                prefs.edit().putFloat(key as String, (value as Number).toFloat()).apply()
+                result.success(null)
+            }
             "setFlag" -> {
                 prefs.edit().putBoolean(call.arguments as String, true).apply()
                 result.success(null)
@@ -222,8 +232,35 @@ class MainActivity : FlutterActivity() {
     private fun emit(event: Map<String, Any>) = main.post { sink?.success(event) }
     private fun reply(result: MethodChannel.Result, value: Any?) = main.post { result.success(value) }
 
+    // ── Grip / tilt, for the GRIP indicator ─────────────────────────────────────────────
+    // Gravity in device coordinates -> tilt (0 = upright portrait, 90 = lying flat screen-up)
+    // and roll (sideways lean; ~±90 in landscape). Sent to Dart at most 5x a second.
+    private var lastPose = 0L
+    private val poseListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val now = System.currentTimeMillis()
+            if (now - lastPose < 200) return
+            lastPose = now
+            val (gx, gy, gz) = e.values
+            val tilt = Math.toDegrees(kotlin.math.atan2(gz.toDouble(), gy.toDouble()))
+            val roll = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), kotlin.math.hypot(gy.toDouble(), gz.toDouble())))
+            emit(mapOf("type" to "pose", "tilt" to tilt, "roll" to roll))
+        }
+
+        override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val sm = getSystemService(SENSOR_SERVICE) as SensorManager
+        (sm.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER))?.let {
+            sm.registerListener(poseListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
     override fun onPause() {
         super.onPause()
+        (getSystemService(SENSOR_SERVICE) as SensorManager).unregisterListener(poseListener)
         sonar?.stop()
         submit(brainThread, "save") { brain?.save() }
     }

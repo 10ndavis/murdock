@@ -13,6 +13,7 @@ import 'sonar/sonar_channel.dart';
 import 'train/camera_teacher.dart';
 import 'ui/guide.dart';
 import 'ui/hud.dart';
+import 'ui/grip.dart';
 import 'ui/system_check.dart';
 
 enum Mode { see, radar, teach }
@@ -44,6 +45,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _samples = 0;
   SonarStats? _stats;
   bool _previewUntaught = false;
+
+  // Grip: live tilt from the motion sensor, and the average tilt while teaching (saved).
+  double _tilt = kIdealTilt;
+  double _roll = 0;
+  double? _taughtTilt;
+  double _sessionTiltSum = 0;
+  int _sessionTiltN = 0;
   String? _lastError;
 
   @override
@@ -55,6 +63,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _samples = b.samples;
       _vision.update(b.depth);
     }));
+    _subs.add(_sonar.pose.listen((p) => setState(() {
+          _tilt = p.tilt;
+          _roll = p.roll;
+          if (_teaching) {
+            _sessionTiltSum += p.tilt;
+            _sessionTiltN++;
+          }
+        })));
+    _sonar.getNumber('taughtTilt').then((t) => _taughtTilt = t);
     _subs.add(_sonar.stats.listen((s) => setState(() {
           _stats = s;
           if (s.pingsPerSec == 0) _signal = 0;
@@ -134,6 +151,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         return;
       }
       setState(() => _teaching = true);
+      _sessionTiltSum = 0;
+      _sessionTiltN = 0;
       await _sonar.setTraining(true);
       try {
         await _camera.start((Uint8List rgb) async => _teacherView.update(await _sonar.teach(rgb)));
@@ -147,6 +166,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _sonar.setTraining(false);
       await _camera.stop();
       await _sonar.save();
+      // Remember how the phone was held while teaching, so SEE can ask for the same grip.
+      if (_sessionTiltN > 25) {
+        final session = _sessionTiltSum / _sessionTiltN;
+        final prev = _taughtTilt;
+        _taughtTilt = prev == null ? session : (prev + session) / 2;
+        await _sonar.setNumber('taughtTilt', _taughtTilt!);
+      }
     }
     if (mounted) setState(() {});
   }
@@ -318,6 +344,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           untaught
               ? 'Generic BatVision head start: a typical room shape. TEACH makes it follow your room.'
               : 'Lights off. Brighter = closer. Move the phone slowly.'),
+      Positioned(left: 16, right: 16, bottom: 104, child: _grip(checkTaught: true)),
     ]);
   }
 
@@ -341,8 +368,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 : ScopeView(frames: _sonar.frames, palette: _palette),
           ),
           const SizedBox(height: 8),
+          _grip(),
+          const SizedBox(height: 8),
           _calibrateButton(),
         ]),
+      );
+
+  /// Live GRIP coaching: tilt, sideways, covered speaker, and (in SEE) "not how you taught it".
+  Widget _grip({bool checkTaught = false}) => GripBadge(
+        advice: GripAdvice.of(
+          tilt: _tilt,
+          roll: _roll,
+          directDb: _stats?.directDb ?? double.nan,
+          taughtTilt: _taughtTilt,
+          checkTaught: checkTaught,
+        ),
+        tilt: _tilt,
+        palette: _palette,
       );
 
   /// Re-learn the speaker's own sound so it can be filtered out of the echoes.
@@ -362,8 +404,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   title: Text('RECALIBRATE SPEAKER', style: Hud.label(_palette.accent, size: 13)),
                   content: const Text(
                     'Murdock filters out the sound going straight from your speaker to your mic, so only '
-                    'real echoes are left.\n\nHold the phone up at arm\'s length, pointing at open space with '
-                    'nothing within 3 ft (not toward a wall or table). Keep still for 2 seconds.',
+                    'real echoes are left.\n\nHold the phone in your normal grip (GRIP OK), pointing at open '
+                    'space with nothing within 3 ft in front (not toward a wall or table). Keep still for '
+                    '2 seconds. Your own body then gets filtered out too.',
                     style: Hud.body,
                   ),
                   actions: [
@@ -447,7 +490,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ]),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
+        _grip(),
+        const SizedBox(height: 10),
         Expanded(
           child: Row(children: [
             Expanded(

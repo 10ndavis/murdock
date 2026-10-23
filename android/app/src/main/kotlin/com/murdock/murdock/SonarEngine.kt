@@ -55,6 +55,7 @@ class SonarEngine(
     @Volatile private var pings = 0
     @Volatile private var calibrations = 0
     @Volatile private var lastDirect = 0f
+    @Volatile private var directAvg = 0f          // smoothed speaker->mic level (for "covered?")
 
     // Rolling history of profiles, oldest first when assembled into the model input.
     private val history = Array(STACK) { FloatArray(PROFILE_FLOATS) }
@@ -107,6 +108,9 @@ class SonarEngine(
             "direct" to lastDirect.toDouble(),
             "volume" to if (maxVol > 0) vol.toDouble() / maxVol else 0.0,
             "calibration" to calibrationState,
+            // Speaker->mic loudness vs. calibration, in dB. Strongly negative = something
+            // (usually a finger) is covering the speaker or mic. NaN until calibrated.
+            "directDb" to if (calDirect > 0f && directAvg > 0f) (20 * log10(directAvg / calDirect)).toDouble() else Double.NaN,
         ))
         pings = 0
     }
@@ -320,10 +324,13 @@ class SonarEngine(
     @Volatile private var calibratingLeft = 0
     @Volatile var calibrationState = "none"; private set
     private val templateFile get() = java.io.File(context.filesDir, "speaker_template.bin")
+    @Volatile private var calDirect = 0f          // speaker->mic level while calibrating
+    private var calDirectSum = 0f
 
     /** Learn the speaker->mic sound over the next CALIBRATION_PINGS pings. */
     fun calibrate() {
         for (c in 0 until CHANNELS) { templateI[c].fill(0f); templateQ[c].fill(0f) }
+        calDirectSum = 0f
         calibrationState = "calibrating"
         calibratingLeft = CALIBRATION_PINGS
     }
@@ -341,7 +348,14 @@ class SonarEngine(
             calibrationState = "saved"
         } catch (e: Exception) {
             Log.w(TAG, "bad speaker template: $e")
+            return
         }
+        // Appended in later versions; older files simply don't have it.
+        calDirect = try {
+            java.io.DataInputStream(f.inputStream().buffered()).use { inp ->
+                inp.skipBytes(CHANNELS * CANCEL_LEN * 8); inp.readFloat()
+            }
+        } catch (e: Exception) { 0f }
     }
 
     private fun saveTemplate() {
@@ -349,6 +363,7 @@ class SonarEngine(
             for (c in 0 until CHANNELS) for (j in 0 until CANCEL_LEN) {
                 out.writeFloat(templateI[c][j]); out.writeFloat(templateQ[c][j])
             }
+            out.writeFloat(calDirect)
         }
     }
 
@@ -377,7 +392,9 @@ class SonarEngine(
                 templateI[c][j] += corrI[c][j] / CALIBRATION_PINGS
                 templateQ[c][j] += corrQ[c][j] / CALIBRATION_PINGS
             }
+            calDirectSum += hypot(corrI[0][0], corrQ[0][0]) / CALIBRATION_PINGS
             if (--calibratingLeft == 0) {
+                calDirect = calDirectSum
                 hasTemplate = true
                 calibrationState = "done"
                 try { saveTemplate() } catch (e: Exception) { Log.w(TAG, "save template: $e") }
@@ -391,7 +408,10 @@ class SonarEngine(
         var directLevel = 0f
         for (c in 0 until CHANNELS) {
             val ref = max(hypot(corrI[c][0], corrQ[c][0]), 1e-9f)
-            if (c == 0) directLevel = ref
+            if (c == 0) {
+                directLevel = ref
+                directAvg = if (directAvg == 0f) ref else 0.9f * directAvg + 0.1f * ref
+            }
             for (b in 0 until RANGE_BINS) {
                 var r = 0f
                 var cleaned = 0f

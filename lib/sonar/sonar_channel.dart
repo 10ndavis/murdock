@@ -71,6 +71,7 @@ class SonarStats {
         calibrations = m['calibrations'] as int? ?? 0,
         volume = (m['volume'] as num?)?.toDouble() ?? 0,
         calibration = m['calibration'] as String? ?? 'none',
+        directDb = (m['directDb'] as num?)?.toDouble() ?? double.nan,
         brain = m['brain'] as String? ?? '';
 
   final bool running;
@@ -89,6 +90,10 @@ class SonarStats {
 
   /// Speaker-cancellation state: none, calibrating, done (just now), saved (from disk).
   final String calibration;
+
+  /// Speaker->mic loudness relative to calibration, in dB (NaN until calibrated). Strongly
+  /// negative means the speaker or mic is probably covered.
+  final double directDb;
   final String brain;
 }
 
@@ -126,6 +131,11 @@ class SonarChannel {
 
   Stream<BrainFrame> get brain => _raw.where((m) => m['type'] == 'brain').map(BrainFrame.new);
 
+  /// Phone tilt in degrees: 0 = upright portrait, 90 = flat screen-up; roll ~±90 = landscape.
+  Stream<({double tilt, double roll})> get pose => _raw
+      .where((m) => m['type'] == 'pose')
+      .map((m) => (tilt: (m['tilt']! as num).toDouble(), roll: (m['roll']! as num).toDouble()));
+
   Stream<SonarStats> get stats => _raw.where((m) => m['type'] == 'stats').map(SonarStats.new);
 
   Stream<String> get errors => _raw.where((m) => m['type'] == 'error').map((m) => m['message']! as String);
@@ -138,6 +148,13 @@ class SonarChannel {
       await _method.invokeMethod<bool>('requestPermission', name) ?? false;
 
   Future<bool> getFlag(String name) async => await _method.invokeMethod<bool>('getFlag', name) ?? false;
+  Future<double?> getNumber(String name) async {
+    final v = await _method.invokeMethod<double>('getNumber', name);
+    return v == null || v.isNaN ? null : v;
+  }
+
+  Future<void> setNumber(String name, double value) => _method.invokeMethod('setNumber', [name, value]);
+
   Future<void> setFlag(String name) => _method.invokeMethod('setFlag', name);
 
   Future<void> start() => _method.invokeMethod('start');

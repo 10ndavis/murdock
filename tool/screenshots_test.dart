@@ -71,9 +71,10 @@ Map<String, Object> _stats({bool broken = false}) => {
       'volume': broken ? 0.3 : 0.9,
       'brain': 'ready',
       'calibration': 'saved',
+      'directDb': -1.5,
     };
 
-void _mockNative({required int samples, bool broken = false}) {
+void _mockNative({required int samples, bool broken = false, double tilt = 18}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
         'getFlag' => true,
@@ -94,6 +95,7 @@ void _mockNative({required int samples, bool broken = false}) {
     _events,
     MockStreamHandler.inline(onListen: (args, sink) {
       sink.success(_stats(broken: broken));
+      sink.success({'type': 'pose', 'tilt': tilt, 'roll': 2.0});
       if (broken) return;
       for (var t = 0; t < 40; t++) {
         sink.success({'type': 'ping', 'profile': _profile(t), 'clean': _profile(t), 'direct': 3.2});
@@ -113,10 +115,11 @@ Future<void> _settle(WidgetTester tester) async {
 void main() {
   setUpAll(_loadFonts);
 
-  Future<void> shoot(WidgetTester tester, String name, {required int samples, String? tab, bool broken = false}) async {
+  Future<void> shoot(WidgetTester tester, String name,
+      {required int samples, String? tab, bool broken = false, double tilt = 18}) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
-    _mockNative(samples: samples, broken: broken);
+    _mockNative(samples: samples, broken: broken, tilt: tilt);
     await tester.pumpWidget(const MurdockApp());
     await _settle(tester);
     if (tab != null) {
@@ -130,7 +133,7 @@ void main() {
   testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true));
   testWidgets('see (untrained)', (t) => shoot(t, 'see_untrained', samples: 0, tab: 'SEE'));
   testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400, tab: 'SEE'));
-  testWidgets('teach', (t) => shoot(t, 'teach', samples: 600, tab: 'TEACH'));
+  testWidgets('teach (speaker aimed at the floor)', (t) => shoot(t, 'teach', samples: 600, tab: 'TEACH', tilt: -15));
   testWidgets('guide', (tester) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
