@@ -108,7 +108,9 @@ class SonarStatus {
         samplesDir = m['samplesDir'] as String? ?? '',
         pendingSteps = m['pendingSteps'] as int? ?? 0,
         teacherBackend = m['teacherBackend'] as String? ?? '',
-        teacherMs = m['teacherMs'] as int? ?? 0;
+        teacherMs = m['teacherMs'] as int? ?? 0,
+        stepsPerSec = (m['stepsPerSec'] as num?)?.toDouble() ?? 0,
+        finishing = m['finishing'] as bool? ?? false;
 
   final bool stereo;
   final String source;
@@ -126,6 +128,10 @@ class SonarStatus {
   /// Where the camera depth teacher runs ("gpu"/"cpu", empty until first use) and how long a frame takes.
   final String teacherBackend;
   final int teacherMs;
+
+  /// Training speed over the last second, and whether FINISH LEARNING is running.
+  final double stepsPerSec;
+  final bool finishing;
 }
 
 class TeachResult {
@@ -183,6 +189,10 @@ class SonarChannel {
   Future<void> start() => _method.invokeMethod('start');
   /// Re-learn the speaker's own sound (~2 s). Hold the phone away from everything.
   Future<void> calibrate() => _method.invokeMethod('calibrate');
+
+  /// FINISH LEARNING: stop the sonar and spend all the effort on the training queue.
+  Future<void> finishLearning() => _method.invokeMethod('finishLearning');
+  Future<void> endFinishLearning() => _method.invokeMethod('endFinishLearning');
 
   Future<void> stop() => _method.invokeMethod('stop');
   Future<void> setTraining(bool on) => _method.invokeMethod('setTraining', on);

@@ -79,7 +79,7 @@ Map<String, Object> _stats({bool broken = false}) => {
       'directDb': -1.5,
     };
 
-void _mockNative({required int samples, bool broken = false, double tilt = 35, bool assist = false}) {
+void _mockNative({required int samples, bool broken = false, double tilt = 35, bool assist = false, int pending = 0}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
         // Guide already seen; camera assist on or off (assistOff flag) per scenario.
@@ -94,6 +94,10 @@ void _mockNative({required int samples, bool broken = false, double tilt = 35, b
             'totalSamples': samples,
             'teacherReady': true,
             'samplesDir': '/sdcard/Android/data/com.murdock.murdock/files/samples',
+            'pendingSteps': pending,
+            'stepsPerSec': 120.0,
+            'teacherBackend': 'gpu',
+            'teacherMs': 42,
           },
         _ => null,
       });
@@ -122,7 +126,8 @@ void main() {
   setUpAll(_loadFonts);
 
   Future<void> shoot(WidgetTester tester, String name,
-      {required int samples, String? tab, bool broken = false, double tilt = 35, bool assist = false}) async {
+      {required int samples, String? tab, bool broken = false, double tilt = 35, bool assist = false, int pending = 0,
+      String? tapAfter}) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
     // A real phone's system bars: status bar on top, 3-button navigation at the bottom.
@@ -130,16 +135,25 @@ void main() {
     const bars = FakeViewPadding(top: 24 * 2.75, bottom: 48 * 2.75);
     tester.view.padding = bars;
     tester.view.viewPadding = bars;
-    _mockNative(samples: samples, broken: broken, tilt: tilt, assist: assist);
+    _mockNative(samples: samples, broken: broken, tilt: tilt, assist: assist, pending: pending);
     await tester.pumpWidget(const MurdockApp());
     await _settle(tester);
     if (tab != null) {
       await tester.tap(find.text(tab));
       await _settle(tester);
     }
+    if (tapAfter != null) {
+      await tester.tap(find.text(tapAfter));
+      await _settle(tester);
+    }
     // No camera in a headless test: drop the resulting "Camera failed" pop-up before capturing.
     tester.state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger)).removeCurrentSnackBar();
     await tester.pump(const Duration(milliseconds: 500));
+    if (find.text('RADAR').evaluate().isEmpty) {
+      // FINISH LEARNING hides the tab bar.
+      await expectLater(find.byType(HomePage), matchesGoldenFile('../docs/screenshots/$name.png'));
+      return;
+    }
     // Nothing may overlap the SEE/RADAR tab bar, which must sit above the system bar.
     final nav = tester.getRect(find.ancestor(of: find.text('RADAR'), matching: find.byType(HudPanel)).first);
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
@@ -157,7 +171,9 @@ void main() {
   testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true, tab: 'RADAR'));
   testWidgets('see (untrained, top leaning toward you)', (t) => shoot(t, 'see_untrained', samples: 0, tilt: -15));
   testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400));
-  testWidgets('see (camera assist on: most controls)', (t) => shoot(t, 'see_assist', samples: 300, assist: true));
+  testWidgets('see (camera assist on: most controls)',
+      (t) => shoot(t, 'see_assist', samples: 300, assist: true, pending: 8000));
+  testWidgets('finish learning', (t) => shoot(t, 'finish_learning', samples: 300, pending: 8000, tapAfter: 'FINISH LEARNING'));
   testWidgets('camera assist comparison', (tester) async {
     tester.view.physicalSize = const Size(1500, 700);
     tester.view.devicePixelRatio = 1.5;

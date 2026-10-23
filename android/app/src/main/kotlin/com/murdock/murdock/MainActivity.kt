@@ -92,6 +92,17 @@ class MainActivity : FlutterActivity() {
             }
             "stop" -> { sonar?.stop(); result.success(null) }
             "calibrate" -> { sonar?.calibrate(); result.success(null) }
+            "finishLearning" -> {
+                // Stop listening (no new samples, no inference) and train flat out.
+                sonar?.stop()
+                finishing = true
+                result.success(null)
+            }
+            "endFinishLearning" -> {
+                finishing = false
+                submit(brainThread, "save") { brain?.save() }
+                result.success(null)
+            }
             "status" -> submit(brainThread, "status", result) {
                 val b = brain
                 val s = sonar
@@ -105,6 +116,8 @@ class MainActivity : FlutterActivity() {
                     "teacherReady" to teacherFile.exists(),
                     "samplesDir" to samplesDir.path,
                     "pendingSteps" to (b?.pendingSteps ?: 0),
+                    "stepsPerSec" to stepsPerSec,
+                    "finishing" to finishing,
                     "teacherBackend" to (teacher?.backend ?: ""),
                     "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))
@@ -187,7 +200,14 @@ class MainActivity : FlutterActivity() {
     // ── Continuous trainer ──────────────────────────────────────────────────────────────
     // Spends the brain's step budget in ~30 ms bursts on the brain thread, leaving gaps so
     // the live echo inference (also on that thread) stays smooth.
+    //
+    // FINISH LEARNING ("finishing"): sonar and camera are off, so the trainer takes the
+    // brain thread in long bursts with no gaps until the queue is empty, then saves.
     @Volatile private var trainerOn = false
+    @Volatile private var finishing = false
+    @Volatile private var stepsPerSec = 0.0
+    private var rateSteps = 0
+    private var rateFrom = System.nanoTime()
 
     private fun startTrainer() {
         if (trainerOn) return
@@ -198,9 +218,17 @@ class MainActivity : FlutterActivity() {
     private fun trainerTick() {
         if (!trainerOn) return
         submit(brainThread, "training") {
-            val steps = brain?.trainFor(TRAIN_BURST_MS) ?: 0
-            // Busy -> come back soon; idle (no budget) -> check again in a while.
-            main.postDelayed(::trainerTick, if (steps > 0) 5L else 250L)
+            val b = brain
+            val steps = b?.trainFor(if (finishing) FINISH_BURST_MS else TRAIN_BURST_MS) ?: 0
+            rateSteps += steps
+            val now = System.nanoTime()
+            if (now - rateFrom > 1_000_000_000L) {
+                stepsPerSec = rateSteps * 1e9 / (now - rateFrom)
+                rateSteps = 0; rateFrom = now
+            }
+            if (finishing && b != null && b.pendingSteps == 0 && steps > 0) b.save() // queue done
+            // Busy -> come back soon (immediately when finishing); idle -> check in a while.
+            main.postDelayed(::trainerTick, if (steps > 0) (if (finishing) 0L else 5L) else 250L)
         }
     }
 
@@ -317,6 +345,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "Murdock"
         private const val TRAIN_BURST_MS = 30L
+        private const val FINISH_BURST_MS = 250L
         private const val PERMISSION_REQUEST_BASE = 4100
     }
 }

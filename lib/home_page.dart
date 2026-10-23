@@ -67,6 +67,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _teacherBackend = '';
   bool _lastFrameLearned = false;
 
+  // FINISH LEARNING: sonar + camera off, the phone works through the training queue.
+  bool _finishing = false;
+  int _finishTotal = 0;
+
   // Grip: live tilt from the motion sensor, and the average tilt while learning (saved).
   double _tilt = kIdealTilt;
   double _roll = 0;
@@ -149,6 +153,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // The native side stops the speaker when the app is backgrounded; resume it here.
     if (state == AppLifecycleState.resumed) {
+      if (_finishing) return; // stay quiet until the user resumes
       _startSonar().then((_) => _syncCamera());
     } else if (state == AppLifecycleState.paused) {
       _stopCamera();
@@ -173,7 +178,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // ───────────────────────────── camera + learning ─────────────────────────────
 
   /// The camera runs in SEE while camera assist is on (it also feeds continuous learning).
-  bool get _wantCamera => (_status?.teacherReady ?? false) && _mode == Mode.see && _assist;
+  bool get _wantCamera => !_finishing && (_status?.teacherReady ?? false) && _mode == Mode.see && _assist;
 
   Future<void> _syncCamera() async {
     if (!mounted) return;
@@ -274,8 +279,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         body: SafeArea(
           child: Column(children: [
             _topBar(),
-            Expanded(child: _blocker != null ? _centerCard(_blocker!) : _body()),
-            _navBar(),
+            Expanded(child: _blocker != null ? _centerCard(_blocker!) : _finishing ? _finishScreen() : _body()),
+            if (!_finishing) _navBar(),
           ]),
         ),
       );
@@ -284,8 +289,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Widget _topBar() {
     final p = _palette;
-    final signal = _signal;
-    final signalText = signal > 0.6 ? 'ECHO STRONG' : signal > 0.3 ? 'ECHO OK' : signal > 0.08 ? 'ECHO WEAK' : 'NO ECHO';
+    final signal = _finishing ? 0.0 : _signal;
+    final signalText = _finishing
+        ? 'SONAR OFF'
+        : signal > 0.6
+            ? 'ECHO STRONG'
+            : signal > 0.3
+                ? 'ECHO OK'
+                : signal > 0.08
+                    ? 'ECHO WEAK'
+                    : 'NO ECHO';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
       child: Row(children: [
@@ -435,7 +448,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         right: 16,
         bottom: 8,
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          if (assisting) _learningStrip(),
+          if (assisting || (_status?.pendingSteps ?? 0) > 0) _learningStrip(),
           const SizedBox(height: 8),
           Row(children: [
             if (teacherReady)
@@ -539,7 +552,96 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Text('With lights on, walk slowly past walls, doors, furniture and people.',
               style: Hud.body.copyWith(fontSize: 11)),
         ],
+        if (pending > 0) ...[
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: _chip(Icons.hourglass_bottom, 'FINISH LEARNING', _startFinish),
+          ),
+        ],
       ]),
+    );
+  }
+
+  // ───────────────────────────── finish learning ─────────────────────────────
+
+  Future<void> _startFinish() async {
+    final pending = _status?.pendingSteps ?? 0;
+    if (pending == 0) {
+      _toast('Nothing queued: it has caught up.');
+      return;
+    }
+    setState(() {
+      _finishing = true;
+      _finishTotal = pending;
+      _showCamera = false;
+    });
+    await _stopCamera();
+    await _sonar.finishLearning();
+  }
+
+  Future<void> _endFinish() async {
+    await _sonar.endFinishLearning();
+    setState(() => _finishing = false);
+    await _startSonar();
+    await _syncCamera();
+  }
+
+  Widget _finishScreen() {
+    final p = _palette;
+    final st = _status;
+    final pending = st?.pendingSteps ?? _finishTotal;
+    final done = pending == 0;
+    final progress = _finishTotal == 0 ? 1.0 : (1 - pending / _finishTotal).clamp(0.0, 1.0);
+    final rate = st?.stepsPerSec ?? 0;
+    String eta() {
+      if (rate < 1) return 'estimating…';
+      final s = (pending / rate).round();
+      return s < 60 ? '~$s s left' : '~${(s / 60).ceil()} min left';
+    }
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: HudPanel(
+          palette: p,
+          padding: const EdgeInsets.all(22),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(done ? 'LEARNING FINISHED' : 'FINISHING LEARNING', style: Hud.label(p.accent, size: 12)),
+            const SizedBox(height: 18),
+            ProgressRing(
+              value: progress,
+              palette: p,
+              size: 150,
+              center: '${(progress * 100).round()}%',
+              caption: done ? 'SAVED' : 'LEARNING',
+            ),
+            const SizedBox(height: 18),
+            Text(
+              done
+                  ? 'Everything it collected has been learned and saved.'
+                  : '$pending steps left · ${rate.round()} steps/s · ${eta()}',
+              textAlign: TextAlign.center,
+              style: Hud.body,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Speaker, microphone and camera are off, so the phone spends all its effort learning from '
+              'what it already collected. Keep the app open; you can put the phone down.',
+              textAlign: TextAlign.center,
+              style: Hud.body.copyWith(fontSize: 12),
+            ),
+            const SizedBox(height: 20),
+            GlowButton(
+              label: done ? 'RESUME' : 'STOP AND RESUME',
+              icon: Icons.play_arrow,
+              filled: done,
+              palette: p,
+              onTap: _endFinish,
+            ),
+          ]),
+        ),
+      ),
     );
   }
 

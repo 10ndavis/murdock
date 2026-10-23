@@ -8,7 +8,8 @@ import '../render/palette.dart';
 /// Shared look: black glass panels, thin neon strokes, corner brackets, mono caps.
 class Hud {
   static const bg = Color(0xFF05060A);
-  static const glass = Color(0x1AFFFFFF);
+  // Dark smoked glass: panels sit over the bright echo picture and must stay readable.
+  static const glass = Color(0xC70B0D14);
   static const text = Color(0xFFE8ECF4);
   static const dim = Color(0x99E8ECF4);
 
