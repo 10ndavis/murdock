@@ -8,6 +8,11 @@ The network is split in two so it can be fine-tuned on the phone:
   head:  two dense layers, (latent + phone pose) -> 32x32 nearness map. Trainable on
          device using only builtin LiteRT ops (activations use hand-written gradients).
 
+A second, small head predicts scene primitives (floor, walls, nearest obstacles; see
+shapes.py) from the same latent + pose. It is separate from the depth head, so the depth
+output is unchanged by it, and it is trained on device next to the depth head with labels
+fitted to the camera teacher's depth.
+
 Phone pose (tilt, roll) is a head input: the same room sounds and looks different at other
 angles, so the AI learns per angle instead of needing one fixed grip. BatVision (a robot)
 has no tilt; its samples use pose 0 and the on-device learning fills in the rest.
@@ -24,6 +29,8 @@ CHANNELS = 2                # stereo mics (mono phones duplicate the channel)
 DEPTH_SIZE = 32             # output nearness map is DEPTH_SIZE x DEPTH_SIZE
 LATENT = 512
 POSE_DIM = 2                # (tilt / 90°, roll / 90°), see pose_features()
+SHAPE_DIM = 24              # scene primitives, see shapes.py
+SHAPE_HIDDEN = 256
 
 INPUT_SHAPE = (STACK, RANGE_BINS, CHANNELS)
 OUTPUT_SHAPE = (DEPTH_SIZE, DEPTH_SIZE)
@@ -84,6 +91,40 @@ def build_head(pose_dim: int = POSE_DIM) -> tf.keras.Model:
     x = L.Dense(DEPTH_SIZE * DEPTH_SIZE, activation=sigmoid_b)(x)
     out = L.Reshape(OUTPUT_SHAPE, name="depth")(x)
     return tf.keras.Model(inputs, out, name="head")
+
+
+def build_shape_head(pose_dim: int = POSE_DIM) -> tf.keras.Model:
+    """(latent + pose) -> SHAPE_DIM primitives in [0, 1] (shapes.py layout)."""
+    L = tf.keras.layers
+    latent = L.Input((LATENT,), name="latent")
+    pose = L.Input((pose_dim,), name="pose")
+    x = L.Concatenate()([latent, pose])
+    x = L.Dense(SHAPE_HIDDEN, activation=relu_b)(x)
+    out = L.Dense(SHAPE_DIM, activation=sigmoid_b, name="shapes")(x)
+    return tf.keras.Model([latent, pose], out, name="shape_head")
+
+
+def _presence_matrix():
+    """(SHAPE_DIM, SHAPE_DIM) P and bias c so that y @ P + c gives each value's loss weight:
+    1 for presences, the shape's presence for its other values (see shapes.presence_mask).
+    A matmul keeps the loss to builtin LiteRT ops."""
+    import numpy as np
+    from shapes import BOXES, FLOOR, MAX_BOXES, WALLS
+    P = np.zeros((SHAPE_DIM, SHAPE_DIM), np.float32)
+    c = np.zeros(SHAPE_DIM, np.float32)
+    for o, n in [(FLOOR, 3)] + [(WALLS + 3 * k, 3) for k in range(3)] + [(BOXES + 6 * k, 6) for k in range(MAX_BOXES)]:
+        c[o] = 1.0
+        P[o, o + 1:o + n] = 1.0
+    return tf.constant(P), tf.constant(c)
+
+
+_P, _C = _presence_matrix()
+
+
+def shape_loss(y_true, y_pred):
+    """Presence-weighted L1: where a wall or box isn't there, its position doesn't matter."""
+    w = tf.matmul(y_true, _P) + _C
+    return tf.reduce_sum(w * tf.abs(y_true - y_pred)) / (tf.reduce_sum(w) + 1e-6)
 
 
 def build_student(pose_dim: int = POSE_DIM):

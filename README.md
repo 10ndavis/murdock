@@ -116,6 +116,29 @@ per 10° of tilt and says when you're at an angle it hasn't learned yet. Old pos
 weights load with the new pose rows at zero (identical output at pose 0). In a simulated
 two-grip session on the phone runtime, the angle input cut held-out error from 0.215 to
 0.162.
+
+A second, small **shapes head** (`ml/shapes.py`) predicts a few scene primitives from the same
+latent and pose: the floor (horizon, nearness), wall panels to the left, ahead and right
+(nearness, slant), and the two nearest obstacles as boxes, each with a confidence. SEE draws
+them as a wireframe over the echo picture, fading by confidence and labelled with the
+nearest echo's distance in feet. The labels are fitted to the camera teacher's depth
+(`ShapeFit.kt`, a line-for-line copy of `shapes.py`; `ml/check_shapes_kotlin.py` checks they
+agree, to 3e-8 on 2,500 maps), so learning them needs no extra work from you and samples
+recorded before the shapes head get labels too. The depth head is untouched: same output and
+the same training step as before (exact on the phone runtime), and learning saved by the
+previous model carries over. Honest numbers (`ml/train_shapes.py`, BatVision test rooms,
+presence-weighted L1, lower is better):
+
+| | shape error |
+|---|---|
+| no audio: average shapes | 0.196 |
+| shapes fitted to the depth head's picture | 0.257 |
+| **shapes head (pretrained on BatVision)** | **0.186** |
+
+Like the depth head, it starts as mostly a room prior. On-device learning
+(`ml/simulate_shapes.py`, 600 samples) improves it 4% in the rooms it was taught, and it
+costs 3% in unseen rooms (depth: +16% / −1%). The shapes head learns at a tenth of the depth
+head's rate; at the full rate it memorised the taught rooms (−20% in unseen ones).
 * **Teacher**: MiDaS v2.1 small, 256×256, downloaded at runtime. Depth Anything V2 Small is
   more accurate and could replace it later. I didn't find a verified TFLite build of it, but
   Qualcomm AI Hub and Arm's ExecuTorch guide both run it on Android.

@@ -13,9 +13,11 @@ import java.nio.ByteOrder
 import kotlin.random.Random
 
 /**
- * The echo -> depth student (assets/models/echo_student.tflite, built by ml/export_tflite.py).
+ * The echo -> depth + shapes student (assets/models/echo_student.tflite, built by
+ * ml/export_tflite.py).
  *
- * Signatures: infer, train (head only), get_weights / set_weights for persistence.
+ * Signatures: infer (depth + scene shapes), train (both heads, trunk frozen), get_weights /
+ * set_weights for persistence. Shape labels are fitted to the camera depth (ShapeFit).
  * Every call runs on the caller's thread; MainActivity funnels them through one executor
  * because the interpreter is not thread-safe and infer/train share its variables.
  */
@@ -24,8 +26,18 @@ class EchoBrain(
     private val weightsFile: File,
     private val samplesDir: File,
 ) {
-    /** One camera-labelled training example: echoes, phone pose (head input), camera depth. */
-    private class Sample(val echo: FloatArray, val pose: FloatArray, val depth: FloatArray)
+    /**
+     * One camera-labelled training example: echoes, phone pose (head input), camera depth,
+     * and the scene shapes fitted to that depth. Shapes are derived (ShapeFit), not stored,
+     * so samples recorded before the shapes head existed get labels too.
+     */
+    private class Sample(val echo: FloatArray, val pose: FloatArray, val depth: FloatArray) {
+        // Fitted on first use (by the trainer), so reloading 2000 samples at startup stays fast.
+        val shapes by lazy(LazyThreadSafetyMode.NONE) { ShapeFit.fit(depth) }
+    }
+
+    /** The echo AI's output: nearness map and scene shapes (ml/shapes.py layout). */
+    class Prediction(val depth: FloatArray, val shapes: FloatArray)
 
     private val replay = ArrayList<Sample>()
 
@@ -38,6 +50,7 @@ class EchoBrain(
     var trainedSteps = 0; private set
     var totalSamples = 0; private set
     var lastLoss = Float.NaN; private set
+    var lastShapeLoss = Float.NaN; private set
     val sampleCount get() = replay.size
 
     @Volatile private var stepBudget = 0f
@@ -64,7 +77,9 @@ class EchoBrain(
         // meta: "<steps> <samples> <modelId> [<queued steps>]". A head trained on another model's trunk features
         // would produce garbage, so after an app update with a new model we start fresh.
         val meta = metaFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")
-        val sameModel = meta != null && meta.size >= 3 && meta[2].toLongOrNull() == modelId
+        // Models that only added a head keep the same trunk: their learning carries over.
+        val savedId = meta?.getOrNull(2)?.toLongOrNull()
+        val sameModel = savedId != null && (savedId == modelId || savedId in SAME_TRUNK_MODELS)
         if (weightsFile.exists() && sameModel) {
             try {
                 restore(it)
@@ -91,9 +106,15 @@ class EchoBrain(
     }
 
     private fun outputIsFinite(target: Interpreter): Boolean {
-        val out = direct(DEPTH_FLOATS)
-        target.runSignature(mapOf("echo" to direct(STACK_FLOATS), "pose" to direct(POSE_DIM)), mapOf("depth" to out), "infer")
-        return out.toFloats(DEPTH_FLOATS).all { it.isFinite() }
+        val p = run(target, direct(STACK_FLOATS), direct(POSE_DIM))
+        return p.depth.all { it.isFinite() } && p.shapes.all { it.isFinite() }
+    }
+
+    private fun run(target: Interpreter, echo: ByteBuffer, pose: ByteBuffer): Prediction {
+        val depth = direct(DEPTH_FLOATS)
+        val shapes = direct(ShapeFit.SHAPE_DIM)
+        target.runSignature(mapOf("echo" to echo, "pose" to pose), mapOf("depth" to depth, "shapes" to shapes), "infer")
+        return Prediction(depth.toFloats(DEPTH_FLOATS), shapes.toFloats(ShapeFit.SHAPE_DIM))
     }
 
     // ── Training safety ─────────────────────────────────────────────────────────────────
@@ -104,11 +125,11 @@ class EchoBrain(
     private var good: Map<String, ByteBuffer>? = null
 
     /** Copy of the current head weights, or null if any value is invalid. */
-    private fun currentWeights(): Map<String, ByteBuffer>? {
-        val outputs = weightNames().associateWith {
-            direct(interpreter.getOutputTensorFromSignature(it, "get_weights").numBytes() / 4)
+    private fun currentWeights(target: Interpreter = interpreter): Map<String, ByteBuffer>? {
+        val outputs = weightNames(target).associateWith {
+            direct(target.getOutputTensorFromSignature(it, "get_weights").numBytes() / 4)
         }
-        interpreter.runSignature(mapOf("dummy" to direct(1)), outputs, "get_weights")
+        target.runSignature(mapOf("dummy" to direct(1)), outputs, "get_weights")
         for (buf in outputs.values) {
             buf.rewind()
             val fb = buf.asFloatBuffer()
@@ -141,15 +162,13 @@ class EchoBrain(
     /** "ok", or how often training had to be rolled back (shown in System Check). */
     val health get() = if (rollbacks == 0) "ok" else "recovered $rollbacks× (learning rate ${"%.3f".format(lr)})"
 
-    fun infer(stack: FloatArray, pose: FloatArray): FloatArray {
+    fun infer(stack: FloatArray, pose: FloatArray): Prediction {
         repeat(2) {
-            val out = direct(DEPTH_FLOATS)
-            interpreter.runSignature(mapOf("echo" to direct(stack), "pose" to direct(pose)), mapOf("depth" to out), "infer")
-            val d = out.toFloats(DEPTH_FLOATS)
-            if (d.all { it.isFinite() }) return d
+            val p = run(interpreter, direct(stack), direct(pose))
+            if (p.depth.all { it.isFinite() } && p.shapes.all { it.isFinite() }) return p
             rollback("invalid prediction")
         }
-        return FloatArray(DEPTH_FLOATS)
+        return Prediction(FloatArray(DEPTH_FLOATS), FloatArray(ShapeFit.SHAPE_DIM))
     }
 
     /**
@@ -229,36 +248,43 @@ class EchoBrain(
     private val trainEcho = direct(BATCH * STACK_FLOATS)
     private val trainPose = direct(BATCH * POSE_DIM)
     private val trainDepth = direct(BATCH * DEPTH_FLOATS)
+    private val trainShapes = direct(BATCH * ShapeFit.SHAPE_DIM)
     private val trainLoss = direct(1)
+    private val trainShapeLoss = direct(1)
     private val trainLr = direct(1)
 
     fun train(steps: Int): Float {
         if (replay.size < BATCH) return Float.NaN
         var total = 0f
+        var shapeTotal = 0f
         var done = 0
         repeat(steps) {
-            trainEcho.clear(); trainPose.clear(); trainDepth.clear()
+            trainEcho.clear(); trainPose.clear(); trainDepth.clear(); trainShapes.clear()
             val ef = trainEcho.asFloatBuffer(); val pf = trainPose.asFloatBuffer(); val df = trainDepth.asFloatBuffer()
+            val sf = trainShapes.asFloatBuffer()
             repeat(BATCH) {
                 val sample = replay[Random.nextInt(replay.size)]
-                ef.put(sample.echo); pf.put(sample.pose); df.put(sample.depth)
+                ef.put(sample.echo); pf.put(sample.pose); df.put(sample.depth); sf.put(sample.shapes)
             }
-            trainLoss.clear()
+            trainLoss.clear(); trainShapeLoss.clear()
             trainLr.clear(); trainLr.asFloatBuffer().put(lr)
             interpreter.runSignature(
-                mapOf("echo" to trainEcho, "pose" to trainPose, "depth" to trainDepth, "lr" to trainLr),
-                mapOf("loss" to trainLoss), "train")
+                mapOf("echo" to trainEcho, "pose" to trainPose, "depth" to trainDepth, "shapes" to trainShapes, "lr" to trainLr),
+                mapOf("loss" to trainLoss, "shape_loss" to trainShapeLoss), "train")
             val l = trainLoss.toFloats(1)[0]
-            if (!l.isFinite() || l > MAX_SANE_LOSS) {
-                rollback("loss $l")
+            val sl = trainShapeLoss.toFloats(1)[0]
+            if (!l.isFinite() || l > MAX_SANE_LOSS || !sl.isFinite() || sl > MAX_SANE_LOSS) {
+                rollback("loss $l / shapes $sl")
                 return Float.NaN
             }
             total += l
+            shapeTotal += sl
             done++
             trainedSteps++
             if (trainedSteps % SNAPSHOT_EVERY == 0) snapshot()
         }
         lastLoss = if (done > 0) total / done else Float.NaN
+        lastShapeLoss = if (done > 0) shapeTotal / done else Float.NaN
         return lastLoss
     }
 
@@ -285,16 +311,20 @@ class EchoBrain(
 
     private fun restore(target: Interpreter) {
         val names = target.getSignatureInputs("set_weights").sortedBy { it.removePrefix("w").toInt() }
-        val inputs = LinkedHashMap<String, Any>()
+        // Start from the shipped weights: a file saved before the shapes head existed holds
+        // only the depth head (w0..w3), and the shapes head keeps its pretrained weights.
+        val inputs = LinkedHashMap<String, Any>(currentWeights(target) ?: error("shipped weights invalid"))
         DataInputStream(weightsFile.inputStream().buffered()).use { inp ->
-            require(inp.readInt() == names.size) { "weights file does not match model" }
-            for (name in names) {
+            val count = inp.readInt()
+            require(count in 1..names.size) { "weights file does not match model" }
+            for (name in names.take(count)) {
                 val bytes = ByteArray(inp.readInt()); inp.readFully(bytes)
                 require(bytes.size == target.getInputTensorFromSignature(name, "set_weights").numBytes())
                 inputs[name] = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).put(bytes)
                     .also { it.rewind() }
             }
         }
+        inputs.values.forEach { (it as ByteBuffer).rewind() }
         target.runSignature(inputs, mapOf("ok" to direct(1)), "set_weights")
     }
 
@@ -316,6 +346,7 @@ class EchoBrain(
         trainedSteps = 0
         totalSamples = 0
         lastLoss = Float.NaN
+        lastShapeLoss = Float.NaN
     }
 
     fun close() {
@@ -323,8 +354,8 @@ class EchoBrain(
         interpreter.close()
     }
 
-    private fun weightNames() =
-        interpreter.getSignatureOutputs("get_weights").sortedBy { it.removePrefix("w").toInt() }
+    private fun weightNames(target: Interpreter = interpreter) =
+        target.getSignatureOutputs("get_weights").sortedBy { it.removePrefix("w").toInt() }
 
     // Last in the class on purpose: Kotlin runs property initializers and init blocks in
     // textual order, and these use fields declared above (good, trainEcho, ...).
@@ -339,6 +370,8 @@ class EchoBrain(
 
     companion object {
         private const val TAG = "EchoBrain"
+        /** CRC32s of earlier shipped models with this model's trunk and depth head layout. */
+        private val SAME_TRUNK_MODELS = setOf(2608876991L)   // pose input, before the shapes head
         const val BATCH = 8           // fixed by the exported train signature
         const val POSE_DIM = 2        // (tilt / 90°, roll / 90°); ml/murdock_model.py pose_features
         private const val RECORD_FLOATS = STACK_FLOATS + POSE_DIM + DEPTH_FLOATS  // one .mdp record

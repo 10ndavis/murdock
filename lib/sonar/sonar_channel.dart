@@ -45,12 +45,18 @@ class SonarFrame {
 class BrainFrame {
   BrainFrame(Map<Object?, Object?> m)
       : depth = m['depth']! as Float32List,
+        shapes = m['shapes'] as Float32List?,
         steps = (m['steps'] as int?) ?? 0,
         loss = (m['loss'] as num?)?.toDouble() ?? double.nan,
+        shapeLoss = (m['shapeLoss'] as num?)?.toDouble() ?? double.nan,
         samples = (m['samples'] as int?) ?? 0;
 
   /// [kDepthSize x kDepthSize] predicted nearness (1 = close).
   final Float32List depth;
+
+  /// Predicted scene shapes (floor, walls, nearest obstacles; render/shapes.dart layout).
+  final Float32List? shapes;
+  final double shapeLoss;
   final int steps;
   final double loss;
 
@@ -199,10 +205,14 @@ class SonarStatus {
 class TeachResult {
   TeachResult(Map<Object?, Object?> m)
       : depth = m['depth']! as Float32List,
+        shapes = m['shapes'] as Float32List?,
         ms = m['ms'] as int? ?? 0,
         backend = m['backend'] as String? ?? '';
 
   final Float32List depth;
+
+  /// Shapes fitted to the camera's depth (what the echo AI learns to predict).
+  final Float32List? shapes;
   final int ms;
   final String backend;
 }
