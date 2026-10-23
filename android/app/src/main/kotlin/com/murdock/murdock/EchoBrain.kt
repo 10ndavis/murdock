@@ -54,7 +54,7 @@ class EchoBrain(
     private fun open(): Interpreter {
         modelBytes.rewind()
         val it = Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
-        // meta: "<steps> <samples> <modelId>". A head trained on another model's trunk features
+        // meta: "<steps> <samples> <modelId> [<queued steps>]". A head trained on another model's trunk features
         // would produce garbage, so after an app update with a new model we start fresh.
         val meta = metaFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")
         val sameModel = meta != null && meta.size >= 3 && meta[2].toLongOrNull() == modelId
@@ -71,6 +71,8 @@ class EchoBrain(
                     return Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
                 }
                 trainedSteps = meta!![0].toInt(); totalSamples = meta[1].toInt()
+                // The training queue survives restarts too (older files don't have it).
+                stepBudget = meta.getOrNull(3)?.toFloatOrNull() ?: 0f
             } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
         } else if (weightsFile.exists()) {
             Log.i(TAG, "model changed; discarding on-device learning from the previous model")
@@ -257,7 +259,7 @@ class EchoBrain(
             }
         }
         tmp.renameTo(weightsFile) // atomic: a crash mid-save can't leave a corrupt file
-        metaFile.writeText("$trainedSteps $totalSamples $modelId")
+        metaFile.writeText("$trainedSteps $totalSamples $modelId $stepBudget")
         sampleOut?.flush()
     }
 

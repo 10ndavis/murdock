@@ -113,9 +113,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _openGuide();
       await _sonar.setFlag('guideSeen');
     }
-    await _startSonar();
     final s = await _sonar.status();
     if (mounted) setState(() => _status = s);
+    // Reopened while FINISH LEARNING is still running in the background: show its progress
+    // instead of starting the sonar.
+    if (s.finishing) {
+      setState(() {
+        _finishing = true;
+        _finishTotal = s.pendingSteps;
+      });
+      return;
+    }
+    await _startSonar();
     await _syncCamera();
   }
 
@@ -125,7 +134,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _refresh() async {
     if (!mounted) return;
     final s = await _sonar.status();
-    if (mounted) setState(() => _status = s);
+    if (!mounted) return;
+    setState(() {
+      _status = s;
+      // The background service may have been started before this screen existed.
+      if (s.finishing && !_finishing) _finishing = true;
+      if (_finishing && s.pendingSteps > _finishTotal) _finishTotal = s.pendingSteps;
+    });
   }
 
   void _toast(String message) {
@@ -571,6 +586,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _toast('Nothing queued: it has caught up.');
       return;
     }
+    // For the progress notification (Android 13+ asks; learning runs either way).
+    await _sonar.requestPermission('notifications');
     setState(() {
       _finishing = true;
       _finishTotal = pending;
@@ -581,7 +598,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _endFinish() async {
-    await _sonar.endFinishLearning();
+    if (_status?.finishing ?? true) await _sonar.endFinishLearning();
     setState(() => _finishing = false);
     await _startSonar();
     await _syncCamera();
@@ -592,6 +609,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final st = _status;
     final pending = st?.pendingSteps ?? _finishTotal;
     final done = pending == 0;
+    // Stopped from the notification (or by Android) before the queue was empty.
+    final stopped = !done && st != null && !st.finishing;
     final progress = _finishTotal == 0 ? 1.0 : (1 - pending / _finishTotal).clamp(0.0, 1.0);
     final rate = st?.stepsPerSec ?? 0;
     String eta() {
@@ -607,7 +626,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           palette: p,
           padding: const EdgeInsets.all(22),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(done ? 'LEARNING FINISHED' : 'FINISHING LEARNING', style: Hud.label(p.accent, size: 12)),
+            Text(done ? 'LEARNING FINISHED' : stopped ? 'LEARNING STOPPED' : 'FINISHING LEARNING',
+                style: Hud.label(p.accent, size: 12)),
             const SizedBox(height: 18),
             ProgressRing(
               value: progress,
@@ -620,22 +640,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             Text(
               done
                   ? 'Everything it collected has been learned and saved.'
-                  : '$pending steps left · ${rate.round()} steps/s · ${eta()}',
+                  : stopped
+                      ? '$pending steps still queued. They\'re saved and continue later.'
+                      : '$pending steps left · ${rate.round()} steps/s · ${eta()}',
               textAlign: TextAlign.center,
               style: Hud.body,
             ),
             const SizedBox(height: 10),
             Text(
-              'Speaker, microphone and camera are off, so the phone spends all its effort learning from '
-              'what it already collected. Keep the app open; you can put the phone down.',
+              done
+                  ? 'Saved. Resume when you\'re ready.'
+                  : 'Speaker, microphone and camera are off, so the phone spends all its effort learning from '
+                      'what it already collected.\n\nYou can close the app: it keeps going in the background '
+                      '(see the notification) and saves when it\'s done.',
               textAlign: TextAlign.center,
               style: Hud.body.copyWith(fontSize: 12),
             ),
             const SizedBox(height: 20),
             GlowButton(
-              label: done ? 'RESUME' : 'STOP AND RESUME',
+              label: done || stopped ? 'RESUME' : 'STOP AND RESUME',
               icon: Icons.play_arrow,
-              filled: done,
+              filled: done || stopped,
               palette: p,
               onTap: _endFinish,
             ),

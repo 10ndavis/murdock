@@ -81,7 +81,9 @@ Map<String, Object> _stats({bool broken = false}) => {
 
 void _mockNative({required int samples, bool broken = false, double tilt = 35, bool assist = false, int pending = 0}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  var finishing = false; // flips when the app starts FINISH LEARNING
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
+        'finishLearning' => finishing = true,
         // Guide already seen; camera assist on or off (assistOff flag) per scenario.
         'getFlag' => call.arguments == 'assistOff' ? !assist : true,
         'requestPermission' => true,
@@ -95,6 +97,7 @@ void _mockNative({required int samples, bool broken = false, double tilt = 35, b
             'teacherReady': true,
             'samplesDir': '/sdcard/Android/data/com.murdock.murdock/files/samples',
             'pendingSteps': pending,
+            'finishing': finishing,
             'stepsPerSec': 120.0,
             'teacherBackend': 'gpu',
             'teacherMs': 42,

@@ -8,14 +8,12 @@ import android.hardware.SensorManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
-import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -28,25 +26,24 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   EventChannel  "murdock/frames": one map per ping {profile, depth?, direct, ...},
  *                                   download progress, and {type: "error"} reports
  *
- * Work runs on two single-thread executors. An exception escaping an executor task kills
- * the whole app on Android, so every task goes through [submit], which reports failures to
- * Dart instead.
+ * The echo AI and its trainer live in [BrainHost] (process-wide, shared with the background
+ * [LearningService]); this activity only borrows them. The camera teacher has its own
+ * thread here. An exception escaping an executor task kills the whole app on Android, so
+ * every task goes through [submit]/[BrainHost.submit], which report failures to Dart instead.
  */
 class MainActivity : FlutterActivity() {
     private val main = Handler(Looper.getMainLooper())
-    private val brainThread = Executors.newSingleThreadExecutor()   // owns EchoBrain
     private val teacherThread = Executors.newSingleThreadExecutor() // owns TeacherDepth
     private val inferBusy = AtomicBoolean(false)
 
     private var sink: EventChannel.EventSink? = null
     private var sonar: SonarEngine? = null
-    private var brain: EchoBrain? = null
     private var teacher: TeacherDepth? = null
     @Volatile private var latestStack: FloatArray? = null
-    @Volatile private var brainState = "loading"
 
     private val prefs by lazy { getSharedPreferences("murdock", MODE_PRIVATE) }
-    private val samplesDir by lazy { File(getExternalFilesDir(null), "samples/v2") } // v2: echo_features input
+    private val samplesDir by lazy { BrainHost.samplesDir(this) }
+    private val brain get() = BrainHost.brain
     private val teacherFile by lazy { File(filesDir, "models/midas_v21_small.tflite") }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -57,24 +54,13 @@ class MainActivity : FlutterActivity() {
             override fun onCancel(arguments: Any?) { sink = null }
         })
         MethodChannel(messenger, "murdock/sonar").setMethodCallHandler(::onCall)
-        startTrainer()
-        submit(brainThread, "load model") {
-            try {
-                brain = loadBrain()
-                brainState = "ready"
-            } catch (t: Throwable) {
-                brainState = "failed: ${t.message ?: t.javaClass.simpleName}"
-                throw t
-            }
-        }
+        BrainHost.onError = ::reportError
+        BrainHost.ensureLoaded(this)
     }
 
-    private fun loadBrain(): EchoBrain {
-        val key = FlutterInjector.instance().flutterLoader().getLookupKeyForAsset("assets/models/echo_student.tflite")
-        val bytes = assets.open(key).use { it.readBytes() }
-        val buf = ByteBuffer.allocateDirect(bytes.size).put(bytes)
-        return EchoBrain(buf, File(filesDir, "brain/head.weights"), samplesDir)
-    }
+    /** Brain-thread task whose failure is also returned to Dart as a channel error. */
+    private fun submitBrain(what: String, result: MethodChannel.Result? = null, task: () -> Unit) =
+        BrainHost.submit(what, onFail = { t -> if (result != null) main.post { result.error(what, t.message, null) } }, task = task)
 
     private fun onCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -83,7 +69,7 @@ class MainActivity : FlutterActivity() {
                     sonar = SonarEngine(this, ::onPing, ::reportError) { stats ->
                         // "ready", or e.g. "recovered 2× (learning rate 0.025)" after a rollback.
                         val b = brain
-                        val state = if (b != null && brainState == "ready" && b.health != "ok") b.health else brainState
+                        val state = if (b != null && BrainHost.state == "ready" && b.health != "ok") b.health else BrainHost.state
                         emit(stats + ("type" to "stats") + ("brain" to state))
                     }
                 }
@@ -93,17 +79,17 @@ class MainActivity : FlutterActivity() {
             "stop" -> { sonar?.stop(); result.success(null) }
             "calibrate" -> { sonar?.calibrate(); result.success(null) }
             "finishLearning" -> {
-                // Stop listening (no new samples, no inference) and train flat out.
+                // Stop listening (no new samples, no inference) and train flat out in a
+                // foreground service, which keeps going if the app is closed.
                 sonar?.stop()
-                finishing = true
+                LearningService.start(this)
                 result.success(null)
             }
             "endFinishLearning" -> {
-                finishing = false
-                submit(brainThread, "save") { brain?.save() }
+                LearningService.stop(this)   // saves what it learned so far
                 result.success(null)
             }
-            "status" -> submit(brainThread, "status", result) {
+            "status" -> submitBrain("status", result) {
                 val b = brain
                 val s = sonar
                 reply(result, mapOf(
@@ -116,8 +102,8 @@ class MainActivity : FlutterActivity() {
                     "teacherReady" to teacherFile.exists(),
                     "samplesDir" to samplesDir.path,
                     "pendingSteps" to (b?.pendingSteps ?: 0),
-                    "stepsPerSec" to stepsPerSec,
-                    "finishing" to finishing,
+                    "stepsPerSec" to BrainHost.stepsPerSec,
+                    "finishing" to BrainHost.finishing,
                     "teacherBackend" to (teacher?.backend ?: ""),
                     "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))
@@ -150,8 +136,8 @@ class MainActivity : FlutterActivity() {
                 val args = call.arguments as Map<*, *>
                 teach(args["rgb"] as ByteArray, args["learn"] as Boolean, result)
             }
-            "save" -> submit(brainThread, "save", result) { brain?.save(); reply(result, null) }
-            "reset" -> submit(brainThread, "reset", result) { brain?.reset(); reply(result, null) }
+            "save" -> submitBrain("save", result) { brain?.save(); reply(result, null) }
+            "reset" -> submitBrain("reset", result) { brain?.reset(); reply(result, null) }
             else -> result.notImplemented()
         }
     }
@@ -163,6 +149,11 @@ class MainActivity : FlutterActivity() {
         val permission = when (name) {
             "microphone" -> android.Manifest.permission.RECORD_AUDIO
             "camera" -> android.Manifest.permission.CAMERA
+            "notifications" -> {
+                // Only Android 13+ asks; older versions always allow notifications.
+                if (android.os.Build.VERSION.SDK_INT < 33) { result.success(true); return }
+                android.Manifest.permission.POST_NOTIFICATIONS
+            }
             else -> { result.error("permission", "unknown permission $name", null); return }
         }
         if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
@@ -192,43 +183,8 @@ class MainActivity : FlutterActivity() {
         submit(teacherThread, "teacher", result) {
             val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
             val depth = t.run(rgb)
-            if (learn) submit(brainThread, "training") { brain?.addSample(stack, depth) }
+            if (learn) submitBrain("training") { brain?.addSample(stack, depth) }
             reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
-        }
-    }
-
-    // ── Continuous trainer ──────────────────────────────────────────────────────────────
-    // Spends the brain's step budget in ~30 ms bursts on the brain thread, leaving gaps so
-    // the live echo inference (also on that thread) stays smooth.
-    //
-    // FINISH LEARNING ("finishing"): sonar and camera are off, so the trainer takes the
-    // brain thread in long bursts with no gaps until the queue is empty, then saves.
-    @Volatile private var trainerOn = false
-    @Volatile private var finishing = false
-    @Volatile private var stepsPerSec = 0.0
-    private var rateSteps = 0
-    private var rateFrom = System.nanoTime()
-
-    private fun startTrainer() {
-        if (trainerOn) return
-        trainerOn = true
-        trainerTick()
-    }
-
-    private fun trainerTick() {
-        if (!trainerOn) return
-        submit(brainThread, "training") {
-            val b = brain
-            val steps = b?.trainFor(if (finishing) FINISH_BURST_MS else TRAIN_BURST_MS) ?: 0
-            rateSteps += steps
-            val now = System.nanoTime()
-            if (now - rateFrom > 1_000_000_000L) {
-                stepsPerSec = rateSteps * 1e9 / (now - rateFrom)
-                rateSteps = 0; rateFrom = now
-            }
-            if (finishing && b != null && b.pendingSteps == 0 && steps > 0) b.save() // queue done
-            // Busy -> come back soon (immediately when finishing); idle -> check in a while.
-            main.postDelayed(::trainerTick, if (steps > 0) (if (finishing) 0L else 5L) else 250L)
         }
     }
 
@@ -238,9 +194,9 @@ class MainActivity : FlutterActivity() {
         emit(mapOf("type" to "ping", "profile" to profile, "clean" to clean, "direct" to directLevel.toDouble()))
         // Inference rides along when the brain is idle; skipped otherwise.
         if (!inferBusy.compareAndSet(false, true)) return
-        val queued = submit(brainThread, "echo AI") {
+        val queued = submitBrain("echo AI") {
             try {
-                val b = brain ?: return@submit
+                val b = brain ?: return@submitBrain
                 val depth = b.infer(stack)
                 emit(mapOf(
                     "type" to "brain",
@@ -330,22 +286,20 @@ class MainActivity : FlutterActivity() {
         super.onPause()
         (getSystemService(SENSOR_SERVICE) as SensorManager).unregisterListener(poseListener)
         sonar?.stop()
-        submit(brainThread, "save") { brain?.save() }
+        submitBrain("save") { brain?.save() }   // also persists the training queue
     }
 
     override fun onDestroy() {
-        trainerOn = false
         sonar?.stop()
-        submit(brainThread, "close") { brain?.close() }
+        // The brain stays alive in BrainHost: a running LearningService may still be using it.
+        BrainHost.onError = null
         submit(teacherThread, "close") { teacher?.close() }
-        brainThread.shutdown(); teacherThread.shutdown()
+        teacherThread.shutdown()
         super.onDestroy()
     }
 
     companion object {
         private const val TAG = "Murdock"
-        private const val TRAIN_BURST_MS = 30L
-        private const val FINISH_BURST_MS = 250L
         private const val PERMISSION_REQUEST_BASE = 4100
     }
 }
