@@ -52,3 +52,5 @@ ml/__pycache__/
 ml/*.weights.h5
 ml/data/
 ml/phone/
+murdock.apk
+android/build/
