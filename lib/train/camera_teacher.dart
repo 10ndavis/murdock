@@ -33,12 +33,21 @@ class CameraTeacher {
     if (controller != null) return;
     final cams = await availableCameras();
     final back = cams.firstWhere((c) => c.lensDirection == CameraLensDirection.back, orElse: () => cams.first);
-    final c = CameraController(back, ResolutionPreset.low,
+    // Medium (~480p): low (240p) looked blurry in CAMERA VIEW, and the teacher's input is a
+    // fixed 256x256 crop either way, so this costs nothing extra per frame.
+    final c = CameraController(back, ResolutionPreset.medium,
         enableAudio: false, imageFormatGroup: ImageFormatGroup.yuv420);
     await c.initialize();
     // The app runs upside down (portraitDown); keep the preview and frames upright for that.
     await c.lockCaptureOrientation(DeviceOrientation.portraitDown).catchError((Object _) {});
     controller = c;
+    await _focusCentre(c);
+    // Continuous autofocus doesn't kick in on every phone when frames are streamed without
+    // an on-screen preview, so re-focus on the centre (what the teacher uses) every few seconds.
+    _refocus = Timer.periodic(const Duration(seconds: 4), (_) {
+      final cc = controller;
+      if (cc != null) _focusCentre(cc);
+    });
     await c.startImageStream((img) async {
       final now = DateTime.now();
       if (_busy || now.difference(_last).inMicroseconds < 1e6 / maxFps) return;
@@ -55,7 +64,26 @@ class CameraTeacher {
     });
   }
 
+  Timer? _refocus;
+
+  static Future<void> _focusCentre(CameraController c) async {
+    const centre = Offset(0.5, 0.5);
+    // Not every camera supports every call (fixed-focus lenses, no metering): ignore those.
+    for (final call in <Future<void> Function()>[
+      () => c.setFocusMode(FocusMode.auto),
+      () => c.setExposureMode(ExposureMode.auto),
+      () => c.setFocusPoint(centre),
+      () => c.setExposurePoint(centre),
+    ]) {
+      try {
+        await call();
+      } catch (_) {}
+    }
+  }
+
   Future<void> stop() async {
+    _refocus?.cancel();
+    _refocus = null;
     final c = controller;
     controller = null;
     if (c == null) return;
