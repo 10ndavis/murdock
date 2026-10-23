@@ -5,18 +5,19 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'render/fusion.dart';
 import 'render/palette.dart';
 import 'render/scope_view.dart';
 import 'render/vision_renderer.dart';
 import 'render/vision_view.dart';
 import 'sonar/sonar_channel.dart';
 import 'train/camera_teacher.dart';
+import 'ui/grip.dart';
 import 'ui/guide.dart';
 import 'ui/hud.dart';
-import 'ui/grip.dart';
 import 'ui/system_check.dart';
 
-enum Mode { see, radar, teach }
+enum Mode { see, radar }
 
 /// Camera-labelled samples that count as "fully taught" (learning continues past it).
 /// Simulated on BatVision: 600 samples get 23% lower error, 1500 only 25%.
@@ -40,23 +41,23 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _sonar = SonarChannel();
   final _vision = VisionRenderer();
-  final _teacherView = VisionRenderer();
   final _camera = CameraTeacher();
   final List<StreamSubscription<Object?>> _subs = [];
 
-  Mode _mode = Mode.radar;
+  Mode _mode = Mode.see;
   SightPalette _palette = SightPalette.radar;
   SonarStatus? _status;
   String? _blocker;
   double? _download;
-  bool _teaching = false;
   double _signal = 0;
   int _samples = 0;
   SonarStats? _stats;
-  bool _previewUntaught = false;
+  String? _lastError;
 
   // Camera assist + continuous learning.
   bool _assist = true;
+  bool _showCamera = false;
+  bool _skipDownload = false;
   double _cameraLuma = 0;
   Float32List? _teacherMap;
   DateTime _teacherAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -64,13 +65,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _teacherBackend = '';
   bool _lastFrameLearned = false;
 
-  // Grip: live tilt from the motion sensor, and the average tilt while teaching (saved).
+  // Grip: live tilt from the motion sensor, and the average tilt while learning (saved).
   double _tilt = kIdealTilt;
   double _roll = 0;
   double? _taughtTilt;
   double _sessionTiltSum = 0;
   int _sessionTiltN = 0;
-  String? _lastError;
 
   @override
   void initState() {
@@ -84,7 +84,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _subs.add(_sonar.pose.listen((p) => setState(() {
           _tilt = p.tilt;
           _roll = p.roll;
-
         })));
     _sonar.getNumber('taughtTilt').then((t) => _taughtTilt = t);
     _sonar.getFlag('assistOff').then((off) => setState(() => _assist = !off));
@@ -111,8 +110,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final s = await _sonar.status();
     if (mounted) setState(() => _status = s);
     await _syncCamera();
-    // Send new users to the place they need to start.
-    if (s.totalSamples >= kTeachGoal ~/ 3 && mounted) setState(() => _mode = Mode.see);
   }
 
   Future<void> _openGuide() =>
@@ -157,33 +154,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _setMode(Mode m) async {
     if (m == _mode) return;
-    if (_mode == Mode.teach) _teaching = false;
     setState(() => _mode = m);
     await _syncCamera();
   }
 
-  Future<void> _setTeaching(bool on) async {
-    if (on == _teaching) return;
-    setState(() => _teaching = on);
-    await _syncCamera();
-  }
-
   Future<void> _setAssist(bool on) async {
-    setState(() => _assist = on);
+    setState(() {
+      _assist = on;
+      if (!on) _showCamera = false;
+    });
     on ? await _sonar.clearFlag('assistOff') : await _sonar.setFlag('assistOff');
     await _syncCamera();
   }
 
-  /// The camera runs while TEACH is teaching, and in SEE while camera assist is on.
-  bool get _wantCamera =>
-      (_status?.teacherReady ?? false) && ((_mode == Mode.teach && _teaching) || (_mode == Mode.see && _assist));
+  // ───────────────────────────── camera + learning ─────────────────────────────
+
+  /// The camera runs in SEE while camera assist is on (it also feeds continuous learning).
+  bool get _wantCamera => (_status?.teacherReady ?? false) && _mode == Mode.see && _assist;
 
   Future<void> _syncCamera() async {
     if (!mounted) return;
     if (_wantCamera && !_camera.running) {
       if (!await _sonar.requestPermission('camera')) {
         _toast('Camera permission is needed for camera assist and learning.');
-        setState(() => _teaching = false);
+        await _setAssist(false);
         return;
       }
       _sessionTiltSum = 0;
@@ -192,7 +186,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await _camera.start(_onCameraFrame);
       } catch (e) {
         _toast('Camera failed: $e');
-        setState(() => _teaching = false);
       }
     } else if (!_wantCamera && _camera.running) {
       await _stopCamera();
@@ -214,8 +207,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// Every camera frame: if the camera can see, get its depth (for the picture) and, if
-  /// bright enough, turn it into a training sample. Continuous: learning never "finishes".
+  /// Every camera frame: if the camera can see, get its depth (to sharpen the echo view) and,
+  /// if bright enough, turn it into a training sample. Learning never "finishes".
   Future<void> _onCameraFrame(TeacherFrame f) async {
     _cameraLuma = _cameraLuma * 0.7 + f.luma * 0.3;
     if (f.luma < kAssistLuma) {
@@ -224,36 +217,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final learn = f.luma >= kLearnLuma;
     final r = await _sonar.teach(f.rgb, learn: learn);
-    _teacherMap = r.depth;
+    _teacherMap = softenCameraDepth(r.depth);
     _teacherAt = DateTime.now();
     _teacherMs = r.ms;
     _teacherBackend = r.backend;
     _lastFrameLearned = learn;
-    _teacherView.update(r.depth);
     if (learn) {
       _sessionTiltSum += _tilt;
       _sessionTiltN++;
     }
   }
 
-  /// Camera's share of the SEE picture, 0 (sound only) .. 1 (camera only).
-  double get _assistWeight {
+  /// How much the camera can currently help, 0 (sound only) .. 1 (well lit).
+  double get _assistLevel {
     if (_mode != Mode.see || !_assist || _teacherMap == null) return 0;
     if (DateTime.now().difference(_teacherAt).inMilliseconds > 1500) return 0;
     return ((_cameraLuma - kAssistLuma) / (kAssistFullLuma - kAssistLuma)).clamp(0.0, 1.0);
   }
 
-  /// SEE picture: camera depth where the camera can see, echo AI everywhere else.
-  Float32List _fuse(Float32List echo) {
-    final w = _assistWeight;
-    final t = _teacherMap;
-    if (w <= 0 || t == null) return echo;
-    final out = Float32List(echo.length);
-    for (var i = 0; i < echo.length; i++) {
-      out[i] = w * t[i] + (1 - w) * echo[i];
-    }
-    return out;
-  }
+  Float32List _fuse(Float32List echo) => fuseEchoCamera(echo, _teacherMap, _assistLevel);
 
   Future<void> _downloadTeacher() async {
     setState(() => _download = 0);
@@ -328,7 +310,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     const items = [
       (Mode.see, Icons.visibility_outlined, 'SEE'),
       (Mode.radar, Icons.radar, 'RADAR'),
-      (Mode.teach, Icons.school_outlined, 'TEACH'),
     ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -366,14 +347,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
 
   Widget _hintPanel(String what, String todo) => HudPanel(
-          palette: _palette,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(what, style: Hud.label(_palette.accent, size: 10)),
-            const SizedBox(height: 4),
-            Text(todo, style: Hud.body.copyWith(fontSize: 12.5)),
-          ]),
-        );
+        palette: _palette,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(what, style: Hud.label(_palette.accent, size: 10)),
+          const SizedBox(height: 4),
+          Text(todo, style: Hud.body.copyWith(fontSize: 12.5)),
+        ]),
+      );
 
   Widget _centerCard(String text, {Widget? action, Widget? top}) => Center(
         child: Padding(
@@ -395,75 +376,152 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _body() => switch (_mode) {
         Mode.see => _seeScreen(),
         Mode.radar => _radarScreen(),
-        Mode.teach => _teachScreen(),
       };
 
   Widget _seeScreen() {
-    final untaught = _taught < 0.15;
-    final teacherReady = _status?.teacherReady ?? false;
+    final status = _status;
+    final teacherReady = status?.teacherReady ?? false;
+    if (status != null && !teacherReady && !_skipDownload) return _downloadCard();
+
     final assisting = _assist && teacherReady;
-    if (untaught && !assisting && !_previewUntaught) {
-      return _centerCard(
-        'The echo AI comes pre-trained on the BatVision dataset (about 11,000 real echo recordings paired with depth '
-        'photos), so it knows what rooms typically look like. It hasn\'t learned YOUR rooms yet, so '
-        'expect a generic room shape that only loosely follows what\'s really there.\n\n'
-        'Turn on camera assist (or use TEACH): wherever the camera can see, it sharpens the picture and '
-        'the echo AI keeps learning.',
-        top: ScanSweep(palette: _palette, size: 110),
-        action: Column(children: [
-          GlowButton(
-            label: teacherReady ? 'TURN ON CAMERA ASSIST' : 'SET UP CAMERA (TEACH)',
-            icon: Icons.videocam_outlined,
-            palette: _palette,
-            filled: true,
-            onTap: () => teacherReady ? _setAssist(true) : _setMode(Mode.teach),
-          ),
-          const SizedBox(height: 10),
-          TextButton(
-            onPressed: () => setState(() => _previewUntaught = true),
-            child: Text('PREVIEW SOUND ONLY', style: Hud.label(_palette.accent, size: 11)),
-          ),
-        ]),
-      );
-    }
-    final w = _assistWeight;
+    final level = _assistLevel;
+    final untaught = _taught < 0.15;
     final String title, body;
-    if (!assisting) {
-      title = untaught ? 'SEE · SOUND ONLY (NOT TAUGHT YET)' : 'SEE · SOUND ONLY';
+    if (_showCamera) {
+      title = 'CAMERA VIEW';
+      body = 'What the camera sees right now. Tap ECHO VIEW to go back.';
+    } else if (!assisting) {
+      title = 'SEE · SOUND ONLY';
       body = untaught
-          ? 'Generic BatVision head start. Camera assist makes it follow your room.'
+          ? 'Generic BatVision head start until it learns your rooms. Turn on camera assist to teach it.'
           : 'Brighter = closer. Move the phone slowly.';
     } else if (_cameraLuma < kAssistLuma) {
       title = 'SEE · SOUND ONLY · TOO DARK FOR CAMERA';
       body = 'The picture comes from echoes alone. Brighter = closer.';
     } else {
-      title = 'SEE · CAMERA ASSIST ${(w * 100).round()}%${_lastFrameLearned ? ' · LEARNING' : ''}';
+      title = 'SEE · CAMERA ASSIST ${(level * 100).round()}%${_lastFrameLearned ? ' · LEARNING' : ''}';
       body = _lastFrameLearned
-          ? 'Camera + sound. Every frame also teaches the echo AI for when it gets dark.'
-          : 'Dim: camera helps the picture but is too noisy to learn from.';
+          ? 'Echo view sharpened by the camera, and every frame teaches the echo AI for the dark.'
+          : 'Dim: the camera helps a little but is too noisy to learn from.';
     }
+    final cam = _camera.controller;
     return Stack(children: [
-      Positioned.fill(child: VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…')),
+      Positioned.fill(
+        child: _showCamera && cam != null && cam.value.isInitialized
+            ? FittedBox(
+                fit: BoxFit.cover,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: cam.value.previewSize?.height ?? 1,
+                  height: cam.value.previewSize?.width ?? 1,
+                  child: CameraPreview(cam),
+                ),
+              )
+            : VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…'),
+      ),
       _hint(title, body),
       Positioned(
         left: 16,
         right: 16,
         bottom: 104,
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Align(
-            alignment: Alignment.centerRight,
-            child: teacherReady
-                ? TextButton.icon(
-                    onPressed: () => _setAssist(!_assist),
-                    icon: Icon(_assist ? Icons.videocam : Icons.videocam_off_outlined, color: _palette.accent, size: 18),
-                    label: Text(_assist ? 'CAMERA ASSIST ON' : 'CAMERA ASSIST OFF', style: Hud.label(_palette.accent, size: 10)),
-                  )
-                : const SizedBox(),
-          ),
+          if (assisting) _learningStrip(),
+          const SizedBox(height: 8),
+          Row(children: [
+            if (teacherReady)
+              _chip(
+                _assist ? Icons.videocam : Icons.videocam_off_outlined,
+                _assist ? 'ASSIST ON' : 'ASSIST OFF',
+                () => _setAssist(!_assist),
+              ),
+            const Spacer(),
+            if (assisting)
+              _chip(
+                _showCamera ? Icons.graphic_eq : Icons.photo_camera_outlined,
+                _showCamera ? 'ECHO VIEW' : 'CAMERA VIEW',
+                () => setState(() => _showCamera = !_showCamera),
+              ),
+          ]),
+          const SizedBox(height: 8),
           _grip(checkTaught: true),
         ]),
       ),
     ]);
+  }
+
+  Widget _chip(IconData icon, String label, VoidCallback onTap) => InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: Hud.bg.withValues(alpha: 0.6),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: _palette.accent.withValues(alpha: 0.6)),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 16, color: _palette.accent),
+            const SizedBox(width: 6),
+            Text(label, style: Hud.label(_palette.accent, size: 10)),
+          ]),
+        ),
+      );
+
+  /// Thin progress bar: how much this phone has learned, plus where the camera AI runs.
+  Widget _learningStrip() {
+    final taught = _taught.clamp(0.0, 1.0);
+    final pending = _status?.pendingSteps ?? 0;
+    final info = [
+      taught >= 1 ? 'LEARNED · STILL IMPROVING' : 'LEARNING ${(taught * 100).round()}%',
+      if (_teacherBackend.isNotEmpty) 'CAMERA AI ${_teacherBackend.toUpperCase()} $_teacherMs MS',
+      if (pending > 0) '$pending STEPS QUEUED',
+    ].join(' · ');
+    return HudPanel(
+      palette: _palette,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Text(info, style: Hud.label(_palette.accent, size: 9)),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(
+            value: taught,
+            minHeight: 3,
+            color: _palette.accent,
+            backgroundColor: _palette.accent.withValues(alpha: 0.15),
+          ),
+        ),
+        if (taught < 1) ...[
+          const SizedBox(height: 6),
+          Text('With lights on, walk slowly past walls, doors, furniture and people.',
+              style: Hud.body.copyWith(fontSize: 11)),
+        ],
+      ]),
+    );
+  }
+
+  Widget _downloadCard() {
+    final d = _download;
+    return _centerCard(
+      'Murdock learns your rooms with a camera depth AI: wherever the camera can see, it sharpens '
+      'the echo view and teaches the echo AI for when it gets dark.\n\n'
+      'One-time 66 MB download. It runs fully on your phone afterwards.',
+      top: Icon(Icons.download_for_offline_outlined, color: _palette.accent, size: 48),
+      action: d == null
+          ? Column(children: [
+              GlowButton(label: 'DOWNLOAD CAMERA AI', icon: Icons.download, palette: _palette, filled: true, onTap: _downloadTeacher),
+              const SizedBox(height: 10),
+              TextButton(
+                onPressed: () => setState(() => _skipDownload = true),
+                child: Text('SOUND ONLY FOR NOW', style: Hud.label(_palette.accent, size: 11)),
+              ),
+            ])
+          : Column(children: [
+              LinearProgressIndicator(value: d, color: _palette.accent, backgroundColor: _palette.accent.withValues(alpha: 0.15)),
+              const SizedBox(height: 8),
+              Text('${(d * 100).round()}%', style: Hud.label(_palette.accent)),
+            ]),
+    );
   }
 
   /// True when the sonar clearly isn't working, so RADAR shows the check instead of an empty scope.
@@ -544,132 +602,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         context: context,
         backgroundColor: const Color(0xF20B0D14),
         isScrollControlled: true,
-        builder: (_) => SafeArea(
+        builder: (sheet) => SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-            // Rebuild with live stats while the sheet is open.
-            child: StreamBuilder<SonarStats>(
-              stream: _sonar.stats,
-              builder: (_, _) => _systemCheck(),
-            ),
-          ),
-        ),
-      );
-
-  Widget _teachScreen() {
-    final p = _palette;
-    final status = _status;
-    if (status != null && !status.teacherReady) {
-      final d = _download;
-      return _centerCard(
-        'To learn, Murdock uses the camera as a teacher: a vision AI works out how far '
-        'everything is, and the echo AI learns to match it.\n\n'
-        'This needs a one-time 66 MB download. It runs fully on your phone afterwards.',
-        top: Icon(Icons.download_for_offline_outlined, color: p.accent, size: 48),
-        action: d == null
-            ? GlowButton(label: 'DOWNLOAD TEACHER', icon: Icons.download, palette: p, filled: true, onTap: _downloadTeacher)
-            : Column(children: [
-                LinearProgressIndicator(value: d, color: p.accent, backgroundColor: p.accent.withValues(alpha: 0.15)),
-                const SizedBox(height: 8),
-                Text('${(d * 100).round()}%', style: Hud.label(p.accent)),
-              ]),
-      );
-    }
-    final cam = _camera.controller;
-    final taught = _taught.clamp(0.0, 1.0);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 76, 16, 100),
-      child: Column(children: [
-        HudPanel(
-          palette: p,
-          child: Row(children: [
-            ProgressRing(
-              value: taught,
-              palette: p,
-              size: 96,
-              center: '${(taught * 100).round()}%',
-              caption: 'TAUGHT',
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(_teaching ? 'TEACHING…' : taught >= 1 ? 'READY FOR THE DARK' : 'HOW TO TEACH',
-                    style: Hud.label(p.accent, size: 11)),
-                const SizedBox(height: 6),
-                Text(
-                  _teaching
-                      ? (_cameraLuma < kLearnLuma
-                          ? 'Too dark to learn from. Turn a light on, or keep going in SEE with camera assist.'
-                          : 'Walk slowly. Point at walls, doors, furniture, people.')
-                      : taught >= 1
-                          ? 'Ready for the dark. It keeps learning in SEE whenever the camera can see, '
-                              'so it only gets better.'
-                          : '1  Lights on\n2  Press START\n3  Walk slowly around the room',
-                  style: Hud.body.copyWith(fontSize: 12.5),
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              // Rebuild with live stats while the sheet is open.
+              StreamBuilder<SonarStats>(stream: _sonar.stats, builder: (_, _) => _systemCheck()),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: () {
+                    Navigator.pop(sheet);
+                    _confirmReset();
+                  },
+                  child: Text('FORGET EVERYTHING IT LEARNED', style: Hud.label(Hud.dim, size: 9)),
                 ),
-                if (_teaching && _teacherBackend.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    'CAMERA AI ON ${_teacherBackend.toUpperCase()} · $_teacherMs MS/FRAME'
-                    '${(_status?.pendingSteps ?? 0) > 0 ? ' · ${_status!.pendingSteps} STEPS QUEUED' : ''}',
-                    style: Hud.label(Hud.dim, size: 8.5),
-                  ),
-                ],
-              ]),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 8),
-        _grip(),
-        const SizedBox(height: 10),
-        Expanded(
-          child: Row(children: [
-            Expanded(
-              child: _feed('WHAT THE CAMERA SEES', _teaching && cam != null && cam.value.isInitialized
-                  ? FittedBox(
-                      fit: BoxFit.cover,
-                      clipBehavior: Clip.hardEdge,
-                      child: SizedBox(
-                        width: cam.value.previewSize?.height ?? 1,
-                        height: cam.value.previewSize?.width ?? 1,
-                        child: CameraPreview(cam),
-                      ),
-                    )
-                  : Center(child: Icon(Icons.videocam_off_outlined, color: Hud.dim))),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _feed('WHAT THE ECHO AI SEES',
-                  VisionView(renderer: _vision, palette: p, placeholder: 'LISTENING…')),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 14),
-        GlowButton(
-          label: _teaching ? 'PAUSE' : 'START TEACHING',
-          icon: _teaching ? Icons.pause : Icons.play_arrow,
-          filled: !_teaching,
-          palette: p,
-          onTap: () => _setTeaching(!_teaching),
-        ),
-        TextButton(
-          onPressed: _confirmReset,
-          child: Text('FORGET EVERYTHING', style: Hud.label(Hud.dim, size: 9)),
-        ),
-      ]),
-    );
-  }
-
-  Widget _feed(String title, Widget child) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: Hud.label(_palette.accent, size: 9)),
-        const SizedBox(height: 6),
-        Expanded(
-          child: Container(
-            decoration: BoxDecoration(border: Border.all(color: _palette.accent.withValues(alpha: 0.3))),
-            child: ClipRect(child: SizedBox.expand(child: child)),
+              ),
+            ]),
           ),
         ),
-      ]);
+      );
 
   Future<void> _confirmReset() async {
     final ok = await showDialog<bool>(
@@ -677,7 +630,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       builder: (c) => AlertDialog(
         backgroundColor: const Color(0xFF0B0D14),
         title: Text('FORGET EVERYTHING?', style: Hud.label(_palette.accent, size: 13)),
-        content: const Text('The echo AI loses everything it learned on this phone.', style: Hud.body),
+        content: const Text(
+            'The echo AI loses everything it learned on this phone, and the recorded samples are deleted. '
+            'It goes back to the BatVision head start.',
+            style: Hud.body),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL')),
           TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('FORGET')),
@@ -685,7 +641,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     if (ok != true) return;
-    await _setTeaching(false);
     await _sonar.reset();
     _vision.update(Float32List(kDepthSize * kDepthSize));
     _toast('Brain reset.');

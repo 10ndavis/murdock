@@ -44,19 +44,19 @@ const _steps = [
           'speaker to your mic, so it can filter it out. If it ever looks wrong, tap RECALIBRATE SPEAKER.\n\n'
           'If the ECHO meter at the top stays empty, your phone\'s speaker or mic can\'t do high '
           'frequencies and the rest of the app won\'t work well.'),
-  _Step(Icons.school, 'STEP 2 · TEACH', 'Train it with the lights on',
-      'Echoes alone don\'t say what things look like, so Murdock has to learn your rooms.\n\n'
-          'In TEACH, the camera shows an AI what the room looks like while the sonar listens. '
-          'The echo AI learns to match the two. Everything stays on your phone.\n\n'
-          'Lights ON. Walk slowly around the room for a few minutes, pointing the phone at walls, '
-          'doorways, furniture and people, until the ring hits 100%. It keeps learning after that: '
-          'the more it sees, the better it gets.'),
+  _Step(Icons.school, 'STEP 2 · LEARN', 'Let it learn with the lights on',
+      'Echoes alone don\'t say what things look like, so Murdock learns your rooms.\n\n'
+          'Open SEE with CAMERA ASSIST on. While the camera can see, a camera depth AI works out how far '
+          'everything is, and the echo AI learns to match it from sound. Everything stays on your phone.\n\n'
+          'Lights on, walk slowly around for a few minutes, pointing the phone at walls, doorways, '
+          'furniture and people, until LEARNING reaches 100%. It keeps improving after that: the more it '
+          'sees, the better it gets.'),
   _Step(Icons.visibility, 'STEP 3 · SEE', 'See in the dark',
-      'SEE blends two sources. Wherever the camera can still see (even dim light), its depth AI '
-          'sharpens the picture, and every usable frame also teaches the echo AI. As it gets darker, '
-          'the picture shifts to sound only. The banner shows the mix (CAMERA ASSIST %).\n\n'
-          'Brighter means closer. Outlines are edges of things. The pulse sweeping outward is each sonar ping.\n\n'
-          'Turn CAMERA ASSIST off for pure sound or to save battery.'),
+      'SEE always shows the echo view. Where the camera can still see (even dim light), it makes that '
+          'view more accurate, like a highly trained echo sense, without turning into a camera image. As '
+          'it gets darker, the picture comes from sound alone. The banner shows the mix (CAMERA ASSIST %).\n\n'
+          'Brighter means closer. Each sonar ping sweeps outward and lights up surfaces as it reaches them.\n\n'
+          'CAMERA VIEW shows the real camera; ASSIST OFF gives pure sound and saves battery.'),
   _Step(Icons.info_outline, 'BE REALISTIC', 'What to expect',
       'Distance is the strong part: echoes measure it to within about 2 inches, out to roughly 18 ft.\n\n'
           'Shapes are blurry, and left/right is rough. A phone has only a couple of microphones, '

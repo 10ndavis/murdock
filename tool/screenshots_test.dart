@@ -12,7 +12,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:murdock/home_page.dart';
 import 'package:murdock/main.dart';
+import 'package:murdock/render/fusion.dart';
 import 'package:murdock/render/palette.dart';
+import 'package:murdock/render/vision_renderer.dart';
+import 'package:murdock/render/vision_view.dart';
 import 'package:murdock/sonar/sonar_channel.dart';
 import 'package:murdock/ui/guide.dart';
 
@@ -130,11 +133,46 @@ void main() {
     await expectLater(find.byType(HomePage), matchesGoldenFile('../docs/screenshots/$name.png'));
   }
 
-  testWidgets('radar', (t) => shoot(t, 'radar', samples: 0));
-  testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true));
-  testWidgets('see (untrained)', (t) => shoot(t, 'see_untrained', samples: 0, tab: 'SEE'));
-  testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400, tab: 'SEE'));
-  testWidgets('teach (speaker aimed at the floor)', (t) => shoot(t, 'teach', samples: 600, tab: 'TEACH', tilt: -15));
+  testWidgets('radar', (t) => shoot(t, 'radar', samples: 0, tab: 'RADAR'));
+  testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true, tab: 'RADAR'));
+  testWidgets('see (untrained, speaker aimed at the floor)', (t) => shoot(t, 'see_untrained', samples: 0, tilt: -15));
+  testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400));
+  testWidgets('camera assist comparison', (tester) async {
+    tester.view.physicalSize = const Size(1500, 700);
+    tester.view.devicePixelRatio = 1.5;
+    final camera = _room();
+    // Stand-in for the echo AI on its own: right layout, but smeared and pulled toward a
+    // "typical room" -- roughly what the sound-only model produces.
+    final echo = Float32List(camera.length);
+    final soft = softenCameraDepth(softenCameraDepth(softenCameraDepth(camera)));
+    for (var i = 0; i < echo.length; i++) {
+      final y = i ~/ kDepthSize;
+      echo[i] = 0.55 * soft[i] + 0.45 * (0.2 + 0.5 * y / kDepthSize);
+    }
+    final fused = fuseEchoCamera(echo, softenCameraDepth(camera), 1);
+    final views = [('SOUND ONLY', echo), ('CAMERA ASSIST 100%', fused), ('RAW CAMERA DEPTH (NEVER SHOWN)', camera)];
+    final renderers = [for (final (_, m) in views) VisionRenderer()..update(m)];
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData(fontFamily: 'monospace'),
+      home: Scaffold(
+        backgroundColor: Colors.black,
+        body: Row(children: [
+          for (var i = 0; i < views.length; i++)
+            Expanded(
+              child: Column(children: [
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text(views[i].$1, style: const TextStyle(color: Color(0xFFFF2457), fontSize: 14)),
+                ),
+                Expanded(child: VisionView(renderer: renderers[i], palette: SightPalette.radar)),
+              ]),
+            ),
+        ]),
+      ),
+    ));
+    await _settle(tester);
+    await expectLater(find.byType(Scaffold), matchesGoldenFile('../docs/screenshots/assist_comparison.png'));
+  });
   testWidgets('guide', (tester) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;

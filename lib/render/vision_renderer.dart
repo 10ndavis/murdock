@@ -15,6 +15,10 @@ class VisionRenderer {
   final Float32List _smooth = Float32List(kDepthSize * kDepthSize);
   final Float32List _up = Float32List(size * size);
   final Uint8List _pixels = Uint8List(size * size * 4);
+  // "Sonar painting": each surface lights up as a ping's wavefront reaches it and then
+  // fades, so the scene is continuously re-painted by sound.
+  final Float32List _glow = Float32List(size * size);
+  double _lastSeconds = 0;
   final math.Random _rng = math.Random(7);
   bool _hasMap = false;
 
@@ -32,6 +36,9 @@ class VisionRenderer {
     _upsample();
     // The wavefront travels from near (1) to far (0) once per 1.4 s.
     final wave = 1.0 - (seconds % 1.4) / 1.4;
+    final dt = (seconds - _lastSeconds).clamp(0.0, 0.2);
+    _lastSeconds = seconds;
+    final fade = math.exp(-dt / 0.55);
     const n = size;
     for (var y = 0; y < n; y++) {
       for (var x = 0; x < n; x++) {
@@ -47,9 +54,13 @@ class VisionRenderer {
         final contour = math.exp(-d * d);
 
         final w = (v - wave) / 0.045;
-        final pulse = math.exp(-w * w);
+        final pulse = math.exp(-w * w) * (0.25 + 0.75 * v);
+        final glow = math.max(_glow[i] * fade, pulse);
+        _glow[i] = glow;
 
-        var intensity = edge * 1.1 + contour * 0.28 * v + pulse * (0.25 + 0.75 * v) * 0.8 + 0.03 * v;
+        // Edges and contours are revealed mostly while the glow from the last ping lasts.
+        final lit = 0.45 + 0.55 * glow;
+        var intensity = (edge * 1.1 + contour * 0.28 * v) * lit + glow * 0.6 + pulse * 0.35 + 0.03 * v;
         if (edge > 0.35 && _rng.nextDouble() < 0.025) intensity += 0.9;
         palette.write(intensity.clamp(0.0, 1.0), _pixels, i * 4);
       }
