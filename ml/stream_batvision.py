@@ -79,6 +79,22 @@ def fetch_part(part, out):
     feats, depths, pending = {}, {}, {}
     stream = io.BufferedReader(RangeStream(API + str(PART_IDS[part])), buffer_size=1 << 22)
     start = time.time()
+    try:
+        _scan(tar_stream=stream, part=part, out=out, feats=feats, depths=depths, pending=pending, start=start)
+    except (tarfile.ReadError, EOFError) as e:
+        # The parts appear to be slices of one archive: the last member of a part can be
+        # cut off where the next part begins. Keep everything read so far either way.
+        pos, size = stream.raw.pos, stream.raw.size or 0
+        print(f"part {part}: archive ended early at {pos / 1e9:.2f}/{size / 1e9:.2f} GB ({e}); "
+              f"keeping {len(feats)} echoes, {len(depths)} depth maps", flush=True)
+    np.savez(os.path.join(out, f"part{part}_echo.npz"), **{k.replace("/", "|"): v for k, v in feats.items()})
+    np.savez(os.path.join(out, f"part{part}_depth.npz"), **{k.replace("/", "|"): v for k, v in depths.items()})
+    open(done_flag, "w").close()
+    print(f"part {part}: done, {len(feats)} echoes, {len(depths)} depth maps, {len(pending)} unpaired ears")
+
+
+def _scan(tar_stream, part, out, feats, depths, pending, start):
+    stream = tar_stream
     with tarfile.open(fileobj=stream, mode="r|gz") as tar:
         for i, m in enumerate(tar):
             if not m.isfile():
@@ -107,14 +123,10 @@ def fetch_part(part, out):
                     depths[name] = depth_to_nearness(d)
             except Exception as e:  # noqa: BLE001 - one corrupt member shouldn't kill a 37 GB pass
                 print(f"  skip {name}: {e}")
-            if i % 20000 == 0:
+            if i % 5000 == 0:
                 gb = stream.raw.pos / 1e9
                 print(f"part {part}: {gb:.1f} GB, {gb * 1e3 / max(time.time() - start, 1):.0f} MB/s, "
                       f"{len(feats)} echoes, {len(depths)} depth maps", flush=True)
-    np.savez(os.path.join(out, f"part{part}_echo.npz"), **{k.replace("/", "|"): v for k, v in feats.items()})
-    np.savez(os.path.join(out, f"part{part}_depth.npz"), **{k.replace("/", "|"): v for k, v in depths.items()})
-    open(done_flag, "w").close()
-    print(f"part {part}: done, {len(feats)} echoes, {len(depths)} depth maps, {len(pending)} unpaired ears")
 
 
 def _load_all(out, kind):
