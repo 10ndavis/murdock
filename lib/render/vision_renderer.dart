@@ -62,7 +62,14 @@ class VisionRenderer {
 
         // Edges and contours are revealed mostly while the glow from the last ping lasts.
         final lit = 0.45 + 0.55 * glow;
-        var intensity = (edge * 1.1 + contour * 0.28 * v) * lit + glow * 0.6 + pulse * 0.35 + 0.03 * v;
+        // Solid bodies: near surfaces are filled, not just outlined, so a box reads as solid
+        // and a doorway (far inside) stays dark. The fill is shaded by the surface's slope
+        // (lit from above-left) and drawn as a fine laser raster, so it keeps the scan look.
+        final near = _smoothstep(0.4, 0.9, v);
+        final shade = (0.75 - (gx * 0.6 + gy) * 5).clamp(0.35, 1.0);
+        final raster = y % 3 == 0 ? 1.0 : 0.6;
+        final fill = near * 0.5 * shade * raster * (0.8 + 0.2 * glow);
+        var intensity = (edge * 1.1 + contour * 0.28 * v) * lit + glow * 0.6 + pulse * 0.35 + fill;
         if (edge > 0.35 && _rng.nextDouble() < 0.025) intensity += 0.9;
         palette.write(intensity.clamp(0.0, 1.0), _pixels, i * 4);
       }
@@ -70,6 +77,11 @@ class VisionRenderer {
     final done = Completer<ui.Image>();
     ui.decodeImageFromPixels(_pixels, n, n, ui.PixelFormat.rgba8888, done.complete);
     return done.future;
+  }
+
+  static double _smoothstep(double a, double b, double x) {
+    final t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    return t * t * (3 - 2 * t);
   }
 
   void _upsample() {
