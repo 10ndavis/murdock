@@ -1,5 +1,6 @@
 package com.murdock.murdock
 
+import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import io.flutter.FlutterInjector
@@ -15,8 +16,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Bridges the native sonar + models to Flutter.
- *   MethodChannel "murdock/sonar": start, stop, teach, setTraining, save, reset,
- *                                  teacherReady, downloadTeacher, status
+ *   MethodChannel "murdock/sonar": requestPermission, start, stop, teach, setTraining, save,
+ *                                  reset, teacherReady, downloadTeacher, status
  *   EventChannel  "murdock/frames": one map per ping {profile, depth?, direct, ...}
  */
 class MainActivity : FlutterActivity() {
@@ -73,6 +74,7 @@ class MainActivity : FlutterActivity() {
                     "samplesDir" to File(getExternalFilesDir(null), "samples").path,
                 ))
             }
+            "requestPermission" -> requestPermission(call.arguments as String, result)
             "setTraining" -> { training = call.arguments as Boolean; result.success(null) }
             "teacherReady" -> result.success(teacherFile.exists())
             "downloadTeacher" -> teacherThread.execute {
@@ -89,6 +91,30 @@ class MainActivity : FlutterActivity() {
             "reset" -> brainThread.execute { brain?.reset(); reply(result, null) }
             else -> result.notImplemented()
         }
+    }
+
+    private val pendingPermissions = HashMap<Int, MethodChannel.Result>()
+
+    /** [name] is "microphone" or "camera"; replies true when granted. */
+    private fun requestPermission(name: String, result: MethodChannel.Result) {
+        val permission = when (name) {
+            "microphone" -> android.Manifest.permission.RECORD_AUDIO
+            "camera" -> android.Manifest.permission.CAMERA
+            else -> { result.error("permission", "unknown permission $name", null); return }
+        }
+        if (checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+            result.success(true)
+            return
+        }
+        val code = PERMISSION_REQUEST_BASE + pendingPermissions.size
+        pendingPermissions[code] = result
+        requestPermissions(arrayOf(permission), code)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        pendingPermissions.remove(requestCode)?.success(
+            grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)
     }
 
     /** Camera frame in -> teacher depth label, paired with the echoes heard at that moment. */
@@ -157,5 +183,6 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val TRAIN_STEPS_PER_SAMPLE = 4
+        private const val PERMISSION_REQUEST_BASE = 4100
     }
 }

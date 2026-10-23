@@ -3,7 +3,6 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'render/palette.dart';
@@ -61,7 +60,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _startSonar() async {
-    if (!await Permission.microphone.request().isGranted) {
+    if (!await _sonar.requestPermission('microphone')) {
       setState(() => _error = 'Microphone permission is needed: the mic is the sensor.');
       return;
     }
@@ -90,7 +89,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _startTraining() async {
     if (!await _sonar.teacherReady()) return; // UI offers the download.
-    if (!await Permission.camera.request().isGranted) {
+    if (!await _sonar.requestPermission('camera')) {
       setState(() => _error = 'Camera permission is needed to teach the echo model.');
       return;
     }

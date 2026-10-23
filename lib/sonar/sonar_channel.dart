@@ -62,6 +62,10 @@ class SonarChannel {
   Stream<double> get downloadProgress =>
       _raw.where((m) => m['type'] == 'download').map((m) => (m['progress']! as num).toDouble());
 
+  /// [name] is 'microphone' or 'camera'.
+  Future<bool> requestPermission(String name) async =>
+      await _method.invokeMethod<bool>('requestPermission', name) ?? false;
+
   Future<void> start() => _method.invokeMethod('start');
   Future<void> stop() => _method.invokeMethod('stop');
   Future<void> setTraining(bool on) => _method.invokeMethod('setTraining', on);
