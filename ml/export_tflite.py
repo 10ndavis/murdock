@@ -79,7 +79,9 @@ class TrainableStudent(tf.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", help="Keras weights from train.py")
-    ap.add_argument("--lr", type=float, default=1e-3)
+    # Head-only SGD on the phone. Measured on BatVision (simulated 10-min TEACH, 12k steps):
+    # lr 1e-3 barely moves (-1%), 0.1 cuts held-out L1 by 25% and stays stable.
+    ap.add_argument("--lr", type=float, default=0.1)
     ap.add_argument("--out", default="../assets/models/echo_student.tflite")
     args = ap.parse_args()
 

@@ -43,6 +43,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   double _signal = 0;
   int _samples = 0;
   SonarStats? _stats;
+  bool _previewUntaught = false;
   String? _lastError;
 
   @override
@@ -292,18 +293,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       };
 
   Widget _seeScreen() {
-    if (_taught < 0.15) {
+    final untaught = _taught < 0.15;
+    if (untaught && !_previewUntaught) {
       return _centerCard(
-        'The AI hasn\'t learned your surroundings yet, so this view would only show noise.\n\n'
-        'Go to TEACH and walk around a lit room for a few minutes first.',
+        'The echo AI comes pre-trained on the BatVision dataset (about 11,000 real echo recordings paired with depth '
+        'photos), so it knows what rooms typically look like. It hasn\'t learned YOUR rooms yet, so '
+        'expect a generic room shape that only loosely follows what\'s really there.\n\n'
+        'For a picture that follows your surroundings, use TEACH in a lit room for a few minutes.',
         top: ScanSweep(palette: _palette, size: 110),
-        action: GlowButton(label: 'TEACH NOW', icon: Icons.school_outlined, palette: _palette, filled: true,
-            onTap: () => _setMode(Mode.teach)),
+        action: Column(children: [
+          GlowButton(label: 'TEACH NOW', icon: Icons.school_outlined, palette: _palette, filled: true,
+              onTap: () => _setMode(Mode.teach)),
+          const SizedBox(height: 10),
+          TextButton(
+            onPressed: () => setState(() => _previewUntaught = true),
+            child: Text('PREVIEW ANYWAY', style: Hud.label(_palette.accent, size: 11)),
+          ),
+        ]),
       );
     }
     return Stack(children: [
       Positioned.fill(child: VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…')),
-      _hint('SEE · SOUND-ONLY VISION', 'Lights off. Brighter = closer. Move the phone slowly.'),
+      _hint(untaught ? 'SEE · PREVIEW (NOT TAUGHT YET)' : 'SEE · SOUND-ONLY VISION',
+          untaught
+              ? 'Generic BatVision head start: a typical room shape. TEACH makes it follow your room.'
+              : 'Lights off. Brighter = closer. Move the phone slowly.'),
     ]);
   }
 

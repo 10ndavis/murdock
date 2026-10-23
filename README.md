@@ -57,16 +57,47 @@ sweeping the phone to build a synthetic aperture. Both are listed below.
     "flex" ops (for example `Conv2DBackpropFilter`), which stock LiteRT doesn't include.
     The head's activations use hand-written gradients so the `train` signature uses only
     builtin ops. `ml/export_tflite.py` enforces this.
-  * The shipped model's trunk is **randomly initialised**. The head can still learn on top of
-    those random features, but results improve a lot once you train the full model on a PC:
+  * The shipped model is **pre-trained on BatVision** (see below); its weights are kept in
+    `ml/weights/batvision_student.weights.h5` for further training on a PC. When the app ships
+    a new model, on-device learning saved against the old one is discarded automatically.
 * **PC training** (`ml/`):
   ```bash
   cd ml && pip install -r requirements.txt
   adb pull /sdcard/Android/data/com.murdock.murdock/files/samples ./phone
-  python train.py --data ./phone --epochs 40          # full trunk + head
+  python train.py --data ./phone --pretrained weights/batvision_student.weights.h5 --epochs 40
   python export_tflite.py --weights student.weights.h5 # -> assets/models/echo_student.tflite
-  # Rebuild the app, then press RESET BRAIN once so stale head weights are dropped.
   ```
+
+### BatVision pre-training: what it does and doesn't do
+
+`ml/stream_batvision.py` streams the 168 GB dataset from its data.gouv mirror and reduces it
+on the fly (nothing large is stored): 41,474 train / 8,243 val / 5,622 test samples using the
+official splits. Two problems had to be solved first:
+
+* **Alignment.** BatVision is hardware-synchronised, but in the phone's 17.5–21.5 kHz band its
+  direct speaker sound is weaker than nearby echoes, so "loudest peak" put echoes at the
+  wrong distance in most recordings (25% correct on BV1, ~10% on BV2). Each dataset is now
+  aligned at its measured emission point.
+* **Scaling.** The phone and BatVision now share one input definition (`echo_features`):
+  speaker sound removed, first ~7 in masked, scaled by the strongest echo.
+
+Results on the held-out test rooms (`ml/evaluate.py`), compared with an audio-free guess:
+
+| | L1 error (lower) | per-room layout correlation (higher) |
+|---|---|---|
+| no audio: average room | 0.220 | 0.545 |
+| **shipped: phone band (17.5–21.5 kHz)** | **0.210** | 0.531 |
+| diagnostic: full band (audible chirp) | 0.197 | 0.556 |
+
+So BatVision mainly teaches the model what a **typical room** looks like, plus a little
+distance sense. In the phone's near-silent band it doesn't learn to read a specific room;
+even full-band audio only does modestly better (`ml/diagnose_fullband.py`). The per-room
+picture has to come from TEACH on your own phone.
+
+That on-device learning works on top of the pre-trained model: `ml/simulate_teach.py` runs the
+shipped `.tflite` on the phone's runtime (LiteRT 1.4.0) through a simulated 10-minute TEACH
+session (12,000 head-training steps on frames from a set of rooms) and cuts L1 error on
+held-out frames from the same rooms by 25% (0.188 → 0.142).
 * **Teacher**: MiDaS v2.1 small, 256×256, downloaded at runtime. Depth Anything V2 Small is
   more accurate and could replace it later. I didn't find a verified TFLite build of it, but
   Qualcomm AI Hub and Arm's ExecuTorch guide both run it on Android.

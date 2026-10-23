@@ -50,7 +50,9 @@ const _steps = [
       'Distance is the strong part: echoes measure it to within about 2 inches, out to roughly 18 ft.\n\n'
           'Shapes are blurry, and left/right is rough. A phone has only a couple of microphones, '
           'so the AI fills in detail from what it learned in your rooms.\n\n'
-          'It works best in rooms you taught it. A new room needs a new TEACH session.'),
+          'Out of the box, the AI is pre-trained on BatVision (real echo recordings with depth photos), '
+          'so it knows what rooms typically look like, but not yours. It works best in rooms you taught '
+          'it; a new room needs a new TEACH session.'),
 ];
 
 class _GuidePageState extends State<GuidePage> {
