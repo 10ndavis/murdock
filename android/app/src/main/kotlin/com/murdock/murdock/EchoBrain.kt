@@ -34,6 +34,8 @@ class EchoBrain(
     private class Sample(val echo: FloatArray, val pose: FloatArray, val depth: FloatArray) {
         // Fitted on first use (by the trainer), so reloading 2000 samples at startup stays fast.
         val shapes by lazy(LazyThreadSafetyMode.NONE) { ShapeFit.fit(depth) }
+        /** Coarse view signature, for spotting near-duplicates (see [addSample]). */
+        val sig = signature(depth)
     }
 
     /** The echo AI's output: nearness map and scene shapes (ml/shapes.py layout). */
@@ -175,9 +177,20 @@ class EchoBrain(
      * Store an (echo, pose, camera depth) example for replay training and the PC dataset
      * (.mdp, see ml/dataset.py). [tiltDeg] feeds the per-angle coverage shown in the app.
      */
-    fun addSample(stack: FloatArray, pose: FloatArray, depth: FloatArray, tiltDeg: Float) {
-        if (replay.size >= MAX_REPLAY) replay.removeAt(Random.nextInt(replay.size))
-        replay.add(Sample(stack, pose, depth))
+    /**
+     * Novelty gate: a view the replay buffer already holds NEAR_LIMIT times is skipped (no
+     * steps, not recorded). Without it, pointing at one box for a minute filled the buffer
+     * with that box and 20 steps per frame taught the AI to draw the box everywhere
+     * (ml/simulate_fixation.py). Returns whether the sample was kept.
+     */
+    fun addSample(stack: FloatArray, pose: FloatArray, depth: FloatArray, tiltDeg: Float): Boolean {
+        val sample = Sample(stack, pose, depth)
+        val kept = isNovel(sample.sig)
+        recentKept = (recentKept shl 1 or (if (kept) 1L else 0L)) and RECENT_MASK
+        recentSeen = minOf(recentSeen + 1, RECENT)
+        if (!kept) return false
+        if (replay.size >= MAX_REPLAY) replay.removeAt(mostRedundant(sample.sig))
+        replay.add(sample)
         totalSamples++
         tiltCoverage[tiltBin(tiltDeg)]++
         stepBudget = minOf(stepBudget + STEPS_PER_SAMPLE, MAX_BUDGET)
@@ -189,6 +202,32 @@ class EchoBrain(
             bb.asFloatBuffer().put(stack).put(pose).put(depth)
             out.write(bb.array())
         }
+        return true
+    }
+
+    // Last RECENT camera frames: which were kept (bit 1) -> "point at something new" hint.
+    private var recentKept = 0L
+    private var recentSeen = 0
+
+    /** Share of the last few camera frames that were new enough to learn from (1 = all). */
+    val recentNovelty get() = if (recentSeen == 0) 1f else java.lang.Long.bitCount(recentKept).toFloat() / recentSeen
+
+    private fun isNovel(sig: FloatArray): Boolean {
+        var near = 0
+        for (r in replay) if (sigDistance(r.sig, sig) < NEAR_DIST && ++near >= NEAR_LIMIT) return false
+        return true
+    }
+
+    /** Index of the replay sample to drop for [sig]: of a random handful, the one most like it. */
+    private fun mostRedundant(sig: FloatArray): Int {
+        var best = Random.nextInt(replay.size)
+        var bestD = sigDistance(replay[best].sig, sig)
+        repeat(EVICT_CANDIDATES - 1) {
+            val i = Random.nextInt(replay.size)
+            val d = sigDistance(replay[i].sig, sig)
+            if (d < bestD) { best = i; bestD = d }
+        }
+        return best
     }
 
     /** Samples learned near [tiltDeg]. */
@@ -220,6 +259,7 @@ class EchoBrain(
         val files = samplesDir.listFiles { f -> f.name.endsWith(".mdp") }?.sortedByDescending { it.lastModified() } ?: return
         val recordBytes = RECORD_FLOATS * 4
         val bb = ByteBuffer.allocate(recordBytes).order(ByteOrder.LITTLE_ENDIAN)
+        var skipped = 0
         for (f in files) {
             if (replay.size >= MAX_REPLAY) break
             try {
@@ -231,7 +271,9 @@ class EchoBrain(
                         val e = FloatArray(STACK_FLOATS).also { fb.get(it) }
                         val p = FloatArray(POSE_DIM).also { fb.get(it) }
                         val d = FloatArray(DEPTH_FLOATS).also { fb.get(it) }
-                        replay.add(Sample(e, p, d))
+                        // Same gate as live samples: also thins out buffers recorded before it.
+                        val sample = Sample(e, p, d)
+                        if (isNovel(sample.sig)) replay.add(sample) else skipped++
                     }
                 }
             } catch (_: java.io.EOFException) {
@@ -240,7 +282,7 @@ class EchoBrain(
                 Log.w(TAG, "skip ${f.name}: $e")
             }
         }
-        Log.i(TAG, "reloaded ${replay.size} samples for replay")
+        Log.i(TAG, "reloaded ${replay.size} samples for replay ($skipped near-duplicates skipped)")
     }
 
     /** A few SGD steps on random replay batches. Returns the mean loss (NaN if no data yet). */
@@ -394,6 +436,27 @@ class EchoBrain(
         // Simulated on BatVision (ml/simulate_teach.py, 12k steps): 600 samples give 23% lower
         // error, 1500 give 25%; so ~20 steps per new sample captures most of the gain quickly.
         const val STEPS_PER_SAMPLE = 20f
+        // Novelty gate (ml/simulate_fixation.py): views closer than NEAR_DIST (mean abs
+        // difference of the 8x8 signature, nearness 0..1) count as the same view.
+        const val NEAR_DIST = 0.035f
+        const val NEAR_LIMIT = 3
+        private const val EVICT_CANDIDATES = 64
+        private const val RECENT = 30
+        private const val RECENT_MASK = (1L shl RECENT) - 1
+
+        /** 8x8 average-pooled nearness (ml/simulate_fixation.py signature). */
+        fun signature(depth: FloatArray): FloatArray {
+            val out = FloatArray(64)
+            for (y in 0 until 32) for (x in 0 until 32) out[(y / 4) * 8 + x / 4] += depth[y * 32 + x]
+            for (i in out.indices) out[i] = if (out[i].isFinite()) out[i] / 16f else 0f
+            return out
+        }
+
+        fun sigDistance(a: FloatArray, b: FloatArray): Float {
+            var s = 0f
+            for (i in a.indices) s += kotlin.math.abs(a[i] - b[i])
+            return s / a.size
+        }
         private const val MAX_BUDGET = 20000f
 
         fun direct(floats: Int): ByteBuffer =

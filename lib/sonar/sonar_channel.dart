@@ -169,7 +169,8 @@ class SonarStatus {
         stepsPerSec = (m['stepsPerSec'] as num?)?.toDouble() ?? 0,
         finishing = m['finishing'] as bool? ?? false,
         tiltCoverage = (m['tiltCoverage'] as List<Object?>? ?? const []).cast<int>(),
-        coverageHere = m['coverageHere'] as int? ?? 0;
+        coverageHere = m['coverageHere'] as int? ?? 0,
+        novelty = (m['novelty'] as num?)?.toDouble() ?? 1;
 
   final bool stereo;
   final String source;
@@ -195,6 +196,9 @@ class SonarStatus {
   /// Samples learned per phone-tilt bin (10° bins from -30°), and at the current tilt.
   final List<int> tiltCoverage;
   final int coverageHere;
+
+  /// Share of recent camera frames new enough to learn from: low = it has seen this view.
+  final double novelty;
 }
 
 class TeachResult {

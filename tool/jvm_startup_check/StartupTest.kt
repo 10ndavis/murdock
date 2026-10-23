@@ -12,8 +12,14 @@ fun main() {
     val model = ByteBuffer.allocateDirect(1024).put(ByteArray(1024) { it.toByte() })
     // Launch 1: fresh install, learn a bit, save (writes weights + meta with the model id).
     val first = EchoBrain(model, weights, File(dir, "samples"))
+    // Novelty gate: the same view over and over is only kept NEAR_LIMIT times.
+    val kept = (0 until 10).count { first.addSample(FloatArray(16 * 128 * 2), EchoBrain.poseFeatures(30f, 0f), floorMap(), 35f) }
+    println("same view x10: kept $kept, recent novelty ${first.recentNovelty}")
+    check(kept == EchoBrain.NEAR_LIMIT && first.sampleCount == kept) { "novelty gate" }
+    first.reset()
+    // Ten different views (the floor at different heights) are all kept.
     repeat(10) { i ->
-        first.addSample(FloatArray(16 * 128 * 2), EchoBrain.poseFeatures(30f, 0f), floorMap(), tiltDeg = if (i < 7) 35f else 62f)
+        check(first.addSample(FloatArray(16 * 128 * 2), EchoBrain.poseFeatures(30f, 0f), floorMap(2 + i * 2), tiltDeg = if (i < 7) 35f else 62f)) { "new view $i dropped" }
     }
     val queued = first.pendingSteps
     // Both heads train: depth and shape labels (fitted to the depth) go in every step.
@@ -68,4 +74,5 @@ fun main() {
 }
 
 /** A floor rising towards the bottom of the view, so the shape fitter has something to find. */
-fun floorMap() = FloatArray(32 * 32) { i -> val y = i / 32; if (y < 12) 0.1f else 0.1f + 0.9f * (y - 12) / 19f }
+fun floorMap(horizon: Int = 12) =
+    FloatArray(32 * 32) { i -> val y = i / 32; if (y < horizon) 0.1f else 0.1f + 0.9f * (y - horizon) / (31f - horizon) }

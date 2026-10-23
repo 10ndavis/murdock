@@ -118,6 +118,8 @@ class MainActivity : FlutterActivity() {
                     // Samples learned per tilt bin, and at the current tilt, for the GRIP strip.
                     "tiltCoverage" to (b?.tiltCoverage?.toList() ?: emptyList<Int>()),
                     "coverageHere" to (b?.coverageAt(BrainHost.tiltDeg) ?: 0),
+                    // Share of recent camera frames new enough to learn from (novelty gate).
+                    "novelty" to (b?.recentNovelty ?: 1f).toDouble(),
                     "teacherBackend" to (teacher?.backend ?: ""),
                     "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))

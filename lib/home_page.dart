@@ -560,7 +560,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             backgroundColor: _palette.accent.withValues(alpha: 0.15),
           ),
         ),
-        if (taught < 1) ...[
+        if (_lastFrameLearned && (_status?.novelty ?? 1) < 0.25) ...[
+          const SizedBox(height: 6),
+          Text('ALREADY LEARNED THIS VIEW · point at something new',
+              style: Hud.label(_palette.hot, size: 9)),
+        ] else if (taught < 1) ...[
           const SizedBox(height: 6),
           Text('With lights on, walk slowly past walls, doors, furniture and people.',
               style: Hud.body.copyWith(fontSize: 11)),
