@@ -35,7 +35,7 @@ class RangeStream(io.RawIOBase):
     """Read-only HTTP stream that transparently resumes (Range) after network errors."""
 
     def __init__(self, url):
-        self.url, self.pos, self.resp = url, 0, None
+        self.url, self.pos, self.resp, self.size = url, 0, None, None
 
     def readable(self):
         return True
@@ -43,6 +43,9 @@ class RangeStream(io.RawIOBase):
     def _open(self):
         req = urllib.request.Request(self.url, headers={"Range": f"bytes={self.pos}-"})
         self.resp = urllib.request.urlopen(req, timeout=60)
+        if self.size is None:  # "bytes 0-N/TOTAL"; a clean early close must not look like EOF
+            total = (self.resp.headers.get("Content-Range") or "").rpartition("/")[2]
+            self.size = int(total) if total.isdigit() else None
 
     def readinto(self, b):
         for attempt in range(20):
@@ -50,6 +53,8 @@ class RangeStream(io.RawIOBase):
                 if self.resp is None:
                     self._open()
                 n = self.resp.readinto(b)
+                if n == 0 and self.size is not None and self.pos < self.size:
+                    raise IOError(f"connection closed early ({self.pos}/{self.size} bytes)")
                 self.pos += n
                 return n
             except Exception as e:  # noqa: BLE001 - any network hiccup: reopen at self.pos
