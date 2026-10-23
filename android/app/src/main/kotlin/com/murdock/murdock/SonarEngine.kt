@@ -37,13 +37,22 @@ class SonarEngine(
     private val context: Context,
     private val onPing: (profile: FloatArray, stack: FloatArray, directLevel: Float) -> Unit,
     private val onError: (String) -> Unit,
+    private val onStats: (Map<String, Any>) -> Unit,
 ) {
     @Volatile private var running = false
     private var playThread: Thread? = null
     private var recordThread: Thread? = null
 
-    var stereo = false; private set
-    var sourceName = ""; private set
+    @Volatile var stereo = false; private set
+    @Volatile var sourceName = ""; private set
+
+    // Live diagnostics, reported once a second through onStats.
+    @Volatile private var speakerState = "starting"
+    @Volatile private var micState = "starting"
+    @Volatile private var micRms = 0f
+    @Volatile private var pings = 0
+    @Volatile private var calibrations = 0
+    @Volatile private var lastDirect = 0f
 
     // Rolling history of profiles, oldest first when assembled into the model input.
     private val history = Array(STACK) { FloatArray(PROFILE_FLOATS) }
@@ -52,6 +61,7 @@ class SonarEngine(
     fun start() {
         if (running) return
         running = true
+        speakerState = "starting"; micState = "starting"
         playThread = Thread({ guarded("speaker", ::playLoop) }, "sonar-play")
             .apply { priority = Thread.MAX_PRIORITY; start() }
         recordThread = Thread({ guarded("microphone", ::recordLoop) }, "sonar-record")
@@ -72,40 +82,83 @@ class SonarEngine(
             loop()
         } catch (t: Throwable) {
             Log.e(TAG, "$what failed", t)
+            if (what == "speaker") speakerState = "failed: ${t.message}" else micState = "failed: ${t.message}"
             running = false
             onError("$what failed: ${t.message ?: t.javaClass.simpleName}")
+            reportStats()
         }
     }
 
+    private fun reportStats() {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val vol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        onStats(mapOf(
+            "running" to running,
+            "speaker" to speakerState,
+            "mic" to micState,
+            "source" to sourceName,
+            "stereo" to stereo,
+            "micDb" to (20 * log10(max(micRms, 1e-7f))).toDouble(),
+            "pingsPerSec" to pings,
+            "calibrations" to calibrations,
+            "direct" to lastDirect.toDouble(),
+            "volume" to if (maxVol > 0) vol.toDouble() / maxVol else 0.0,
+        ))
+        pings = 0
+    }
+
     private fun playLoop() {
-        val ping = FloatArray(PING_PERIOD)
+        // 16-bit PCM: the one output format every Android device supports.
+        val ping = ShortArray(PING_PERIOD)
         val chirp = SonarConfig.chirpIQ[0]
-        for (n in 0 until CHIRP_LEN) ping[n] = chirp[n] * SonarConfig.CHIRP_AMPLITUDE
-        val minBuf = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build())
-            .setAudioFormat(AudioFormat.Builder()
-                .setSampleRate(SAMPLE_RATE)
-                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .build())
-            .setBufferSizeInBytes(max(minBuf, PING_PERIOD * 4 * 2))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            .build()
+        for (n in 0 until CHIRP_LEN) ping[n] = (chirp[n] * SonarConfig.CHIRP_AMPLITUDE * Short.MAX_VALUE).toInt().toShort()
+        val track = openTrack()
         try {
             track.play()
-            while (running) track.write(ping, 0, ping.size, AudioTrack.WRITE_BLOCKING)
+            speakerState = "playing"
+            while (running) {
+                val n = track.write(ping, 0, ping.size)
+                if (n < 0) throw IllegalStateException("AudioTrack.write error $n")
+            }
         } finally {
             track.stop()
             track.release()
         }
     }
 
+    private fun openTrack(): AudioTrack {
+        val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        var lastError: Exception? = null
+        for (lowLatency in booleanArrayOf(true, false)) {
+            try {
+                val b = AudioTrack.Builder()
+                    .setAudioAttributes(AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build())
+                    .setAudioFormat(AudioFormat.Builder()
+                        .setSampleRate(SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build())
+                    .setBufferSizeInBytes(max(minBuf, PING_PERIOD * 2 * 2))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                if (lowLatency) b.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                val t = b.build()
+                if (t.state == AudioTrack.STATE_INITIALIZED) return t
+                t.release()
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw IllegalStateException("speaker unavailable: ${lastError?.message}")
+    }
+
+    /**
+     * Tries mic configurations in order of preference. A config only counts if it actually
+     * delivers non-silent audio: some phones accept a config, then return zeros or errors.
+     */
     @SuppressLint("MissingPermission") // RECORD_AUDIO is requested by the Dart side before start().
     private fun openRecorder(): AudioRecord {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -114,40 +167,59 @@ class SonarEngine(
         val sources = buildList {
             if (unprocessed) add(MediaRecorder.AudioSource.UNPROCESSED to "unprocessed")
             add(MediaRecorder.AudioSource.VOICE_RECOGNITION to "voice_recognition")
+            add(MediaRecorder.AudioSource.CAMCORDER to "camcorder")
             add(MediaRecorder.AudioSource.MIC to "mic")
         }
+        val tried = ArrayList<String>()
         for ((source, name) in sources) {
             for (mask in intArrayOf(AudioFormat.CHANNEL_IN_STEREO, AudioFormat.CHANNEL_IN_MONO)) {
+                if (!running) throw IllegalStateException("stopped")
+                val label = "$name/${if (mask == AudioFormat.CHANNEL_IN_STEREO) "stereo" else "mono"}"
+                micState = "trying $label"
+                var rec: AudioRecord? = null
                 try {
-                    val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_FLOAT)
-                    if (minBuf <= 0) continue
-                    val rec = AudioRecord.Builder()
+                    val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_16BIT)
+                    if (minBuf <= 0) { tried += "$label: unsupported"; continue }
+                    rec = AudioRecord.Builder()
                         .setAudioSource(source)
                         .setAudioFormat(AudioFormat.Builder()
                             .setSampleRate(SAMPLE_RATE)
-                            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                             .setChannelMask(mask)
                             .build())
-                        .setBufferSizeInBytes(max(minBuf, PING_PERIOD * 4 * 2 * 4))
+                        .setBufferSizeInBytes(max(minBuf, PING_PERIOD * 2 * 2 * 8))
                         .build()
-                    if (rec.state == AudioRecord.STATE_INITIALIZED) {
-                        stereo = rec.channelCount == 2
-                        sourceName = name
-                        return rec
+                    if (rec.state != AudioRecord.STATE_INITIALIZED) { tried += "$label: init failed"; rec.release(); continue }
+                    rec.startRecording()
+                    // Probe ~0.3 s: must read without errors and not be digital silence.
+                    val probe = ShortArray(SAMPLE_RATE / 10 * rec.channelCount)
+                    var energy = 0.0
+                    var ok = true
+                    repeat(3) {
+                        val n = rec.read(probe, 0, probe.size)
+                        if (n <= 0) ok = false else for (i in 0 until n) energy += probe[i].toDouble() * probe[i]
                     }
-                    rec.release()
+                    if (!ok || energy == 0.0) {
+                        tried += "$label: ${if (!ok) "read error" else "silent"}"
+                        rec.stop(); rec.release(); continue
+                    }
+                    stereo = rec.channelCount == 2
+                    sourceName = label
+                    micState = "listening"
+                    return rec
                 } catch (e: Exception) {
-                    Log.w(TAG, "recorder $name/$mask failed: $e")
+                    tried += "$label: ${e.message}"
+                    rec?.release()
                 }
             }
         }
-        throw IllegalStateException("No usable microphone configuration")
+        throw IllegalStateException("no working microphone (${tried.joinToString("; ")})")
     }
 
     private fun recordLoop() {
         val rec = openRecorder()
         val inChannels = if (stereo) 2 else 1
-        val chunk = FloatArray(PING_PERIOD * inChannels)
+        val chunk = ShortArray(PING_PERIOD * inChannels)
         // De-interleaved rolling buffer with absolute sample indexing.
         val capacity = PING_PERIOD * 8
         val buf = Array(CHANNELS) { FloatArray(capacity) }
@@ -159,25 +231,33 @@ class SonarEngine(
         val need = SEARCH + RANGE_SAMPLES + CHIRP_LEN
         val warmup = SAMPLE_RATE / 4  // let the speaker/AGC settle before calibrating
         var seen = 0L
+        var lastStats = System.currentTimeMillis()
+        val scale = 1f / 32768f
 
         try {
-            rec.startRecording()
             while (running) {
-                val got = rec.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
-                if (got <= 0) continue
+                val got = rec.read(chunk, 0, chunk.size)
+                if (got < 0) throw IllegalStateException("AudioRecord.read error $got")
+                if (got == 0) continue
                 val frames = got / inChannels
                 if (bufLen + frames > capacity) {
                     val drop = bufLen + frames - capacity
                     for (c in 0 until CHANNELS) System.arraycopy(buf[c], drop, buf[c], 0, bufLen - drop)
                     bufStart += drop; bufLen -= drop
                 }
+                var energy = 0f
                 for (f in 0 until frames) {
-                    val l = chunk[f * inChannels]
+                    val l = chunk[f * inChannels] * scale
                     buf[0][bufLen + f] = l
-                    buf[1][bufLen + f] = if (inChannels == 2) chunk[f * inChannels + 1] else l
+                    buf[1][bufLen + f] = if (inChannels == 2) chunk[f * inChannels + 1] * scale else l
+                    energy += l * l
                 }
+                micRms = sqrt(energy / frames)
                 bufLen += frames
                 seen += frames
+
+                val now = System.currentTimeMillis()
+                if (now - lastStats >= 1000) { lastStats = now; reportStats() }
                 if (seen < warmup) continue
 
                 if (nextDirect < 0) {
@@ -192,6 +272,7 @@ class SonarEngine(
                     nextDirect = bufStart + from + bestAt + PING_PERIOD
                     avgDirect = best
                     weakPings = 0
+                    calibrations++
                     continue
                 }
 
@@ -204,6 +285,8 @@ class SonarEngine(
                         if (e > best) { best = e; shift = s }
                     }
                     val direct = base + shift
+                    lastDirect = best
+                    pings++
                     emitPing(buf, direct)
                     avgDirect = 0.95f * avgDirect + 0.05f * best
                     weakPings = if (best < 0.25f * avgDirect) weakPings + 1 else 0
@@ -215,6 +298,7 @@ class SonarEngine(
         } finally {
             rec.stop()
             rec.release()
+            micState = "stopped"
         }
     }
 

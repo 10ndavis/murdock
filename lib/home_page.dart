@@ -13,6 +13,7 @@ import 'sonar/sonar_channel.dart';
 import 'train/camera_teacher.dart';
 import 'ui/guide.dart';
 import 'ui/hud.dart';
+import 'ui/system_check.dart';
 
 enum Mode { see, radar, teach }
 
@@ -41,19 +42,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _teaching = false;
   double _signal = 0;
   int _samples = 0;
+  SonarStats? _stats;
+  String? _lastError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _subs.add(_sonar.frames.listen((f) {
-      _signal = _signal * 0.9 + f.signal * 0.1;
-      _samples = f.samples;
-      final d = f.depth;
-      if (d != null) _vision.update(d);
+    _subs.add(_sonar.frames.listen((f) => _signal = _signal * 0.9 + f.signal * 0.1));
+    _subs.add(_sonar.brain.listen((b) {
+      _samples = b.samples;
+      _vision.update(b.depth);
     }));
+    _subs.add(_sonar.stats.listen((s) => setState(() {
+          _stats = s;
+          if (s.pingsPerSec == 0) _signal = 0;
+        })));
     _subs.add(_sonar.downloadProgress.listen((p) => setState(() => _download = p)));
-    _subs.add(_sonar.errors.listen(_toast));
+    // Errors land in the System Check panel; only a new kind of error pops a message.
+    _subs.add(_sonar.errors.listen((e) {
+      if (e != _lastError) _toast(e);
+      setState(() => _lastError = e);
+    }));
     _subs.add(Stream.periodic(const Duration(milliseconds: 700)).listen((_) => _refresh()));
     _boot();
   }
@@ -187,7 +197,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Text('MURDOCK', style: Hud.title(p.accent, size: 18).copyWith(fontWeight: FontWeight.w500, letterSpacing: 6)),
           const SizedBox(height: 4),
           Row(children: [
-            SignalBars(value: signal, palette: p, caption: signalText),
+            GestureDetector(
+              onTap: _openSystemCheck,
+              child: SignalBars(value: signal, palette: p, caption: signalText),
+            ),
             const SizedBox(width: 14),
             Text('BRAIN ${(_taught.clamp(0, 1) * 100).round()}%', style: Hud.label(p.accent, size: 9)),
           ]),
@@ -195,6 +208,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         const Spacer(),
         _iconButton(Icons.palette_outlined, 'Switch colour',
             () => setState(() => _palette = _palette == SightPalette.radar ? SightPalette.sonar : SightPalette.radar)),
+        _iconButton(Icons.monitor_heart_outlined, 'System check', _openSystemCheck),
         _iconButton(Icons.help_outline, 'How it works', _openGuide),
       ]),
     );
@@ -241,7 +255,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         left: 16,
         right: 16,
         top: MediaQuery.paddingOf(context).top + 76,
-        child: HudPanel(
+        child: _hintPanel(what, todo),
+      );
+
+  Widget _hintPanel(String what, String todo) => HudPanel(
           palette: _palette,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -249,8 +266,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             const SizedBox(height: 4),
             Text(todo, style: Hud.body.copyWith(fontSize: 12.5)),
           ]),
-        ),
-      );
+        );
 
   Widget _centerCard(String text, {Widget? action, Widget? top}) => Center(
         child: Padding(
@@ -291,17 +307,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ]);
   }
 
-  Widget _radarScreen() => Stack(children: [
-        Positioned.fill(
+  /// True when the sonar clearly isn't working, so RADAR shows the check instead of an empty scope.
+  bool get _broken {
+    final st = _stats;
+    return st != null && (!st.running || st.pingsPerSec == 0 || st.micDb < -85);
+  }
+
+  Widget _radarScreen() => Padding(
+        padding: EdgeInsets.fromLTRB(16, MediaQuery.paddingOf(context).top + 76, 16, 100),
+        child: Column(children: [
+          _hintPanel('RADAR · RAW ECHOES, NO AI',
+              'Hold the phone 50 cm from a wall: a bump appears in the ECHO TRACE near 0.5 m. '
+              'Step back and it slides right. That bump is the echo.'),
+          const SizedBox(height: 10),
+          Expanded(
+            child: _broken
+                ? SingleChildScrollView(child: HudPanel(palette: _palette, child: _systemCheck()))
+                : ScopeView(frames: _sonar.frames, palette: _palette),
+          ),
+        ]),
+      );
+
+  Widget _systemCheck() => SystemCheck(stats: _stats, signal: _signal, lastError: _lastError, palette: _palette);
+
+  Future<void> _openSystemCheck() => showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: const Color(0xF20B0D14),
+        isScrollControlled: true,
+        builder: (_) => SafeArea(
           child: Padding(
-            padding: const EdgeInsets.only(top: 150, bottom: 96),
-            child: ScopeView(frames: _sonar.frames, palette: _palette),
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+            // Rebuild with live stats while the sheet is open.
+            child: StreamBuilder<SonarStats>(
+              stream: _sonar.stats,
+              builder: (_, _) => _systemCheck(),
+            ),
           ),
         ),
-        _hint('RADAR · RAW ECHOES, NO AI',
-            'Bottom = your phone. Each arc is something reflecting sound; higher = further. '
-            'Top strip: echo history. Walk toward a wall to see it move.'),
-      ]);
+      );
 
   Widget _teachScreen() {
     final p = _palette;

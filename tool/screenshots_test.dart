@@ -58,7 +58,21 @@ Float32List _profile(int t) {
   return p;
 }
 
-void _mockNative({required int samples}) {
+Map<String, Object> _stats({bool broken = false}) => {
+      'type': 'stats',
+      'running': true,
+      'speaker': 'playing',
+      'mic': 'listening',
+      'source': 'unprocessed/stereo',
+      'stereo': true,
+      'micDb': broken ? -120.0 : -38.0,
+      'pingsPerSec': broken ? 0 : 23,
+      'calibrations': 1,
+      'volume': broken ? 0.3 : 0.9,
+      'brain': 'ready',
+    };
+
+void _mockNative({required int samples, bool broken = false}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
         'getFlag' => true,
@@ -78,8 +92,11 @@ void _mockNative({required int samples}) {
   messenger.setMockStreamHandler(
     _events,
     MockStreamHandler.inline(onListen: (args, sink) {
+      sink.success(_stats(broken: broken));
+      if (broken) return;
       for (var t = 0; t < 40; t++) {
-        sink.success({'type': 'ping', 'profile': _profile(t), 'direct': 3.2, 'depth': _room(), 'samples': samples});
+        sink.success({'type': 'ping', 'profile': _profile(t), 'direct': 3.2});
+        sink.success({'type': 'brain', 'depth': _room(), 'samples': samples, 'steps': samples * 4, 'loss': 0.1});
       }
     }),
   );
@@ -95,10 +112,10 @@ Future<void> _settle(WidgetTester tester) async {
 void main() {
   setUpAll(_loadFonts);
 
-  Future<void> shoot(WidgetTester tester, String name, {required int samples, String? tab}) async {
+  Future<void> shoot(WidgetTester tester, String name, {required int samples, String? tab, bool broken = false}) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
-    _mockNative(samples: samples);
+    _mockNative(samples: samples, broken: broken);
     await tester.pumpWidget(const MurdockApp());
     await _settle(tester);
     if (tab != null) {
@@ -109,6 +126,7 @@ void main() {
   }
 
   testWidgets('radar', (t) => shoot(t, 'radar', samples: 0));
+  testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true));
   testWidgets('see (untrained)', (t) => shoot(t, 'see_untrained', samples: 0, tab: 'SEE'));
   testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400, tab: 'SEE'));
   testWidgets('teach', (t) => shoot(t, 'teach', samples: 600, tab: 'TEACH'));

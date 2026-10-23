@@ -97,21 +97,57 @@ class _ScopePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
-    final split = size.height * 0.38;
     final label = TextStyle(color: palette.accent, fontSize: 10, letterSpacing: 2, fontFamily: 'monospace');
+    final traceBottom = size.height * 0.26;
+    final split = size.height * 0.46;
 
+    // 1. Echo trace ("A-scan"): echo strength against distance for the latest ping.
+    //    The direct speaker->mic blast is at 0 m; every other peak is something reflecting.
+    _text(canvas, 'ECHO TRACE', const Offset(0, 0), label);
+    final trace = Path();
+    final fill = Path()..moveTo(0, traceBottom);
+    for (var b = 0; b < kRangeBins; b++) {
+      final v = (current[b * 2] + current[b * 2 + 1]) / 2;
+      final x = b / (kRangeBins - 1) * size.width;
+      final y = traceBottom - v * (traceBottom - 16);
+      b == 0 ? trace.moveTo(x, y) : trace.lineTo(x, y);
+      fill.lineTo(x, y);
+    }
+    fill
+      ..lineTo(size.width, traceBottom)
+      ..close();
+    canvas.drawPath(fill, Paint()..color = palette.accent.withValues(alpha: 0.12));
+    canvas.drawPath(
+        trace,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 4
+          ..color = palette.accent.withValues(alpha: 0.35)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+    canvas.drawPath(
+        trace,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5
+          ..color = palette.hot);
+
+    // 2. Waterfall: the same trace over time, newest on top.
+    final wfTop = traceBottom + 22;
+    _text(canvas, 'ECHO HISTORY', Offset(0, traceBottom + 6), label);
     final img = waterfall;
     if (img != null) {
       canvas.drawImageRect(
         img,
         Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-        Rect.fromLTWH(0, 0, size.width, split),
+        Rect.fromLTWH(0, wfTop, size.width, split - wfTop),
         Paint()..filterQuality = FilterQuality.low,
       );
     }
     for (final m in [1, 2, 3, 4, 5]) {
       final x = m / (kRangeBins * kMetresPerBin) * size.width;
       _text(canvas, '${m}m', Offset(x + 2, split - 14), label);
+      final tick = Paint()..color = palette.accent.withValues(alpha: 0.35);
+      canvas.drawLine(Offset(x, 14), Offset(x, traceBottom), tick);
       canvas.drawLine(Offset(x, split - 16), Offset(x, split), Paint()..color = palette.accent);
     }
 

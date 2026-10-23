@@ -40,6 +40,7 @@ class MainActivity : FlutterActivity() {
     private var teacher: TeacherDepth? = null
     @Volatile private var latestStack: FloatArray? = null
     @Volatile private var training = false
+    @Volatile private var brainState = "loading"
 
     private val prefs by lazy { getSharedPreferences("murdock", MODE_PRIVATE) }
     private val teacherFile by lazy { File(filesDir, "models/midas_v21_small.tflite") }
@@ -52,7 +53,15 @@ class MainActivity : FlutterActivity() {
             override fun onCancel(arguments: Any?) { sink = null }
         })
         MethodChannel(messenger, "murdock/sonar").setMethodCallHandler(::onCall)
-        submit(brainThread, "load model") { brain = loadBrain() }
+        submit(brainThread, "load model") {
+            try {
+                brain = loadBrain()
+                brainState = "ready"
+            } catch (t: Throwable) {
+                brainState = "failed: ${t.message ?: t.javaClass.simpleName}"
+                throw t
+            }
+        }
     }
 
     private fun loadBrain(): EchoBrain {
@@ -65,7 +74,11 @@ class MainActivity : FlutterActivity() {
     private fun onCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "start" -> {
-                if (sonar == null) sonar = SonarEngine(this, ::onPing) { msg -> reportError(msg) }
+                if (sonar == null) {
+                    sonar = SonarEngine(this, ::onPing, ::reportError) { stats ->
+                        emit(stats + ("type" to "stats") + ("brain" to brainState))
+                    }
+                }
                 sonar!!.start()
                 result.success(null)
             }
@@ -146,28 +159,26 @@ class MainActivity : FlutterActivity() {
 
     private fun onPing(profile: FloatArray, stack: FloatArray, directLevel: Float) {
         latestStack = stack
-        val event = hashMapOf<String, Any>(
-            "type" to "ping",
-            "profile" to profile,
-            "direct" to directLevel.toDouble(),
-        )
-        // Inference rides along with the ping when the brain is idle; dropped otherwise.
-        if (!inferBusy.compareAndSet(false, true)) { emit(event); return }
-        val queued = submit(brainThread, "inference") {
+        // Raw echoes go straight to the UI: RADAR must work even if the AI can't run.
+        emit(mapOf("type" to "ping", "profile" to profile, "direct" to directLevel.toDouble()))
+        // Inference rides along when the brain is idle; skipped otherwise.
+        if (!inferBusy.compareAndSet(false, true)) return
+        val queued = submit(brainThread, "echo AI") {
             try {
-                val b = brain
-                if (b != null) {
-                    event["depth"] = b.infer(stack)
-                    event["steps"] = b.trainedSteps
-                    event["loss"] = b.lastLoss.toDouble()
-                    event["samples"] = b.totalSamples
-                    // Keep learning from the replay buffer between camera frames.
-                    if (training) b.train(1)
-                }
+                val b = brain ?: return@submit
+                val depth = b.infer(stack)
+                // Keep learning from the replay buffer between camera frames.
+                if (training) b.train(1)
+                emit(mapOf(
+                    "type" to "brain",
+                    "depth" to depth,
+                    "steps" to b.trainedSteps,
+                    "loss" to b.lastLoss.toDouble(),
+                    "samples" to b.totalSamples,
+                ))
             } finally {
                 inferBusy.set(false)
             }
-            emit(event)
         }
         if (!queued) inferBusy.set(false)
     }
