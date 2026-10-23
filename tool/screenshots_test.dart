@@ -16,6 +16,8 @@ import 'package:murdock/render/fusion.dart';
 import 'package:murdock/render/palette.dart';
 import 'package:murdock/render/vision_renderer.dart';
 import 'package:murdock/render/vision_view.dart';
+import 'package:murdock/ui/grip.dart';
+import 'package:murdock/ui/hud.dart';
 import 'package:murdock/sonar/sonar_channel.dart';
 import 'package:murdock/ui/guide.dart';
 
@@ -77,11 +79,11 @@ Map<String, Object> _stats({bool broken = false}) => {
       'directDb': -1.5,
     };
 
-void _mockNative({required int samples, bool broken = false, double tilt = 18}) {
+void _mockNative({required int samples, bool broken = false, double tilt = 35, bool assist = false}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
-        // Guide already seen; camera assist off (no camera in a headless test).
-        'getFlag' => true,
+        // Guide already seen; camera assist on or off (assistOff flag) per scenario.
+        'getFlag' => call.arguments == 'assistOff' ? !assist : true,
         'requestPermission' => true,
         'teacherReady' => true,
         'status' => {
@@ -120,23 +122,42 @@ void main() {
   setUpAll(_loadFonts);
 
   Future<void> shoot(WidgetTester tester, String name,
-      {required int samples, String? tab, bool broken = false, double tilt = 18}) async {
+      {required int samples, String? tab, bool broken = false, double tilt = 35, bool assist = false}) async {
     tester.view.physicalSize = const Size(1080, 2340);
     tester.view.devicePixelRatio = 2.75;
-    _mockNative(samples: samples, broken: broken, tilt: tilt);
+    // A real phone's system bars: status bar on top, 3-button navigation at the bottom.
+    // (Without these the tab bar once overlapped the controls on a real device.)
+    const bars = FakeViewPadding(top: 24 * 2.75, bottom: 48 * 2.75);
+    tester.view.padding = bars;
+    tester.view.viewPadding = bars;
+    _mockNative(samples: samples, broken: broken, tilt: tilt, assist: assist);
     await tester.pumpWidget(const MurdockApp());
     await _settle(tester);
     if (tab != null) {
       await tester.tap(find.text(tab));
       await _settle(tester);
     }
+    // No camera in a headless test: drop the resulting "Camera failed" pop-up before capturing.
+    tester.state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger)).removeCurrentSnackBar();
+    await tester.pump(const Duration(milliseconds: 500));
+    // Nothing may overlap the SEE/RADAR tab bar, which must sit above the system bar.
+    final nav = tester.getRect(find.ancestor(of: find.text('RADAR'), matching: find.byType(HudPanel)).first);
+    final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+    expect(nav.bottom, lessThanOrEqualTo(screen.height - 48 + 0.5), reason: 'tab bar under the system bar');
+    for (final f in [find.byType(GripBadge), find.text('RECALIBRATE SPEAKER'), find.text('CAMERA VIEW')]) {
+      for (final e in f.evaluate()) {
+        final r = tester.getRect(find.byWidget(e.widget));
+        expect(r.bottom, lessThanOrEqualTo(nav.top + 0.5), reason: '${e.widget.runtimeType} overlaps the tab bar');
+      }
+    }
     await expectLater(find.byType(HomePage), matchesGoldenFile('../docs/screenshots/$name.png'));
   }
 
   testWidgets('radar', (t) => shoot(t, 'radar', samples: 0, tab: 'RADAR'));
   testWidgets('radar (sonar not working)', (t) => shoot(t, 'radar_broken', samples: 0, broken: true, tab: 'RADAR'));
-  testWidgets('see (untrained, speaker aimed at the floor)', (t) => shoot(t, 'see_untrained', samples: 0, tilt: -15));
+  testWidgets('see (untrained, top leaning toward you)', (t) => shoot(t, 'see_untrained', samples: 0, tilt: -15));
   testWidgets('see (trained)', (t) => shoot(t, 'see', samples: 1400));
+  testWidgets('see (camera assist on: most controls)', (t) => shoot(t, 'see_assist', samples: 300, assist: true));
   testWidgets('camera assist comparison', (tester) async {
     tester.view.physicalSize = const Size(1500, 700);
     tester.view.devicePixelRatio = 1.5;

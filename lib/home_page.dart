@@ -269,11 +269,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => Scaffold(
         backgroundColor: Hud.bg,
-        body: Stack(children: [
-          Positioned.fill(child: _blocker != null ? _centerCard(_blocker!) : _body()),
-          Positioned(left: 0, right: 0, top: 0, child: SafeArea(child: _topBar())),
-          Positioned(left: 0, right: 0, bottom: 0, child: SafeArea(child: _navBar())),
-        ]),
+        // A plain column inside the safe area: the bars take their real height on every phone
+        // (status bar, 3-button or gesture navigation, upside-down), so nothing can overlap.
+        body: SafeArea(
+          child: Column(children: [
+            _topBar(),
+            Expanded(child: _blocker != null ? _centerCard(_blocker!) : _body()),
+            _navBar(),
+          ]),
+        ),
       );
 
   // ───────────────────────────── chrome ─────────────────────────────
@@ -345,7 +349,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _hint(String what, String todo) => Positioned(
         left: 16,
         right: 16,
-        top: MediaQuery.paddingOf(context).top + 76,
+        top: 8,
         child: _hintPanel(what, todo),
       );
 
@@ -429,7 +433,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Positioned(
         left: 16,
         right: 16,
-        bottom: 104,
+        bottom: 8,
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           if (assisting) _learningStrip(),
           const SizedBox(height: 8),
@@ -473,7 +477,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _stalledCard(String why) => Padding(
-        padding: EdgeInsets.fromLTRB(16, MediaQuery.paddingOf(context).top + 76, 16, 100),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
         child: SingleChildScrollView(
           child: HudPanel(
             palette: _palette,
@@ -570,7 +574,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _radarScreen() => Padding(
-        padding: EdgeInsets.fromLTRB(16, MediaQuery.paddingOf(context).top + 76, 16, 100),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
         child: Column(children: [
           _hintPanel('RADAR · RAW ECHOES, NO AI',
               'Hold the phone 2 ft from a wall: a bump appears in the ECHO TRACE at about 2 ft. '
