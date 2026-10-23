@@ -8,6 +8,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'render/fusion.dart';
 import 'render/palette.dart';
 import 'render/scope_view.dart';
+import 'render/shape_overlay.dart';
+import 'render/shapes.dart';
 import 'render/vision_renderer.dart';
 import 'render/vision_view.dart';
 import 'sonar/sonar_channel.dart';
@@ -41,6 +43,10 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _sonar = SonarChannel();
   final _vision = VisionRenderer();
+  // Scene shapes (floor, walls, obstacles) drawn as wireframe over the echo picture.
+  final _shapes = ShapeTracker();
+  Float32List? _teacherShapes;
+  double? _echoFeet;
   final _camera = CameraTeacher();
   final List<StreamSubscription<Object?>> _subs = [];
 
@@ -79,11 +85,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _subs.add(_sonar.frames.listen((f) => _signal = _signal * 0.9 + f.signal * 0.1));
+    _subs.add(_sonar.frames.listen((f) {
+      _signal = _signal * 0.9 + f.signal * 0.1;
+      _echoFeet = nearestEchoFeet(f.clean);
+    }));
     _subs.add(_sonar.brain.listen((b) {
       _samples = b.samples;
       _lastBrainAt = DateTime.now();
       _vision.update(_fuse(b.depth));
+      final shapes = cleanShapes(b.shapes);
+      if (shapes != null) _shapes.update(fuseShapes(shapes, _teacherShapes, _assistLevel));
     }));
     _subs.add(_sonar.pose.listen((p) => setState(() {
           _tilt = p.tilt;
@@ -213,6 +224,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _stopCamera() async {
     await _camera.stop();
     _teacherMap = null;
+    _teacherShapes = null;
     await _sonar.save();
   }
 
@@ -227,6 +239,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final learn = f.luma >= kLearnLuma;
     final r = await _sonar.teach(f.rgb, learn: learn);
     _teacherMap = softenCameraDepth(r.depth);
+    _teacherShapes = cleanShapes(r.shapes);
     _teacherAt = DateTime.now();
     _teacherMs = r.ms;
     _teacherBackend = r.backend;
@@ -414,7 +427,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       title = 'SEE · SOUND ONLY';
       body = untaught
           ? 'Generic BatVision head start until it learns your rooms. Turn on camera assist to teach it.'
-          : 'Brighter = closer. Move the phone slowly.';
+          : 'Brighter = closer; outlines = floor, walls and obstacles it recognises. Move slowly.';
     } else if (_cameraLuma < kAssistLuma) {
       title = 'SEE · SOUND ONLY · TOO DARK FOR CAMERA';
       body = 'The picture comes from echoes alone. Brighter = closer.';
@@ -437,7 +450,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: CameraPreview(cam),
                 ),
               )
-            : VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…'),
+            : Stack(fit: StackFit.expand, children: [
+                VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…'),
+                if (_vision.hasMap) ShapeOverlay(tracker: _shapes, palette: _palette, feet: () => _echoFeet),
+              ]),
       ),
       _hint(title, body),
       Positioned(

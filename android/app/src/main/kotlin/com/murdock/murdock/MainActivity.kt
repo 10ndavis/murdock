@@ -190,7 +190,8 @@ class MainActivity : FlutterActivity() {
             val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
             val depth = t.run(rgb)
             if (learn) submitBrain("training") { brain?.addSample(stack, pose, depth, tilt) }
-            reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
+            // The camera's own shapes too, so camera assist can sharpen the shape overlay.
+            reply(result, mapOf("depth" to depth, "shapes" to ShapeFit.fit(depth), "ms" to t.lastMs.toInt(), "backend" to t.backend))
         }
     }
 
@@ -203,10 +204,12 @@ class MainActivity : FlutterActivity() {
         val queued = submitBrain("echo AI") {
             try {
                 val b = brain ?: return@submitBrain
-                val depth = b.infer(stack, BrainHost.pose)
+                val p = b.infer(stack, BrainHost.pose)
                 emit(mapOf(
                     "type" to "brain",
-                    "depth" to depth,
+                    "depth" to p.depth,
+                    "shapes" to p.shapes,
+                    "shapeLoss" to b.lastShapeLoss.toDouble(),
                     "steps" to b.trainedSteps,
                     "loss" to b.lastLoss.toDouble(),
                     "samples" to b.totalSamples,

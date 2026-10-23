@@ -8,5 +8,5 @@ here=$(cd "$(dirname "$0")" && pwd)
 src="$here/../../android/app/src/main/kotlin/com/murdock/murdock"
 out=$(mktemp -d)
 "${KOTLINC:-kotlinc}" -jvm-target 17 -nowarn -d "$out" \
-  "$here/Fakes.kt" "$here/android/util/Log.kt" "$src/EchoBrain.kt" "$src/SonarConfig.kt" "$here/StartupTest.kt"
+  "$here/Fakes.kt" "$here/android/util/Log.kt" "$src/EchoBrain.kt" "$src/ShapeFit.kt" "$src/SonarConfig.kt" "$here/StartupTest.kt"
 java -cp "$out:$(dirname "$(command -v "${KOTLINC:-kotlinc}")")/../lib/kotlin-stdlib.jar" StartupTestKt
