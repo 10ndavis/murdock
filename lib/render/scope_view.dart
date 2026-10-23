@@ -98,7 +98,7 @@ class _ScopePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
     final split = size.height * 0.38;
-    final label = TextStyle(color: palette.accent, fontSize: 10, letterSpacing: 2);
+    final label = TextStyle(color: palette.accent, fontSize: 10, letterSpacing: 2, fontFamily: 'monospace');
 
     final img = waterfall;
     if (img != null) {

@@ -3,6 +3,7 @@ package com.murdock.murdock
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -11,14 +12,21 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Bridges the native sonar + models to Flutter.
  *   MethodChannel "murdock/sonar": requestPermission, start, stop, teach, setTraining, save,
  *                                  reset, teacherReady, downloadTeacher, status
- *   EventChannel  "murdock/frames": one map per ping {profile, depth?, direct, ...}
+ *   EventChannel  "murdock/frames": one map per ping {profile, depth?, direct, ...},
+ *                                   download progress, and {type: "error"} reports
+ *
+ * Work runs on two single-thread executors. An exception escaping an executor task kills
+ * the whole app on Android, so every task goes through [submit], which reports failures to
+ * Dart instead.
  */
 class MainActivity : FlutterActivity() {
     private val main = Handler(Looper.getMainLooper())
@@ -33,6 +41,7 @@ class MainActivity : FlutterActivity() {
     @Volatile private var latestStack: FloatArray? = null
     @Volatile private var training = false
 
+    private val prefs by lazy { getSharedPreferences("murdock", MODE_PRIVATE) }
     private val teacherFile by lazy { File(filesDir, "models/midas_v21_small.tflite") }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -43,7 +52,7 @@ class MainActivity : FlutterActivity() {
             override fun onCancel(arguments: Any?) { sink = null }
         })
         MethodChannel(messenger, "murdock/sonar").setMethodCallHandler(::onCall)
-        brainThread.execute { brain = loadBrain() }
+        submit(brainThread, "load model") { brain = loadBrain() }
     }
 
     private fun loadBrain(): EchoBrain {
@@ -56,12 +65,12 @@ class MainActivity : FlutterActivity() {
     private fun onCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "start" -> {
-                if (sonar == null) sonar = SonarEngine(this, ::onPing)
+                if (sonar == null) sonar = SonarEngine(this, ::onPing) { msg -> reportError(msg) }
                 sonar!!.start()
                 result.success(null)
             }
             "stop" -> { sonar?.stop(); result.success(null) }
-            "status" -> brainThread.execute {
+            "status" -> submit(brainThread, "status", result) {
                 val b = brain
                 val s = sonar
                 reply(result, mapOf(
@@ -69,6 +78,7 @@ class MainActivity : FlutterActivity() {
                     "source" to (s?.sourceName ?: ""),
                     "samples" to (b?.sampleCount ?: 0),
                     "steps" to (b?.trainedSteps ?: 0),
+                    "totalSamples" to (b?.totalSamples ?: 0),
                     "loss" to (b?.lastLoss?.toDouble() ?: Double.NaN),
                     "teacherReady" to teacherFile.exists(),
                     "samplesDir" to File(getExternalFilesDir(null), "samples").path,
@@ -77,18 +87,19 @@ class MainActivity : FlutterActivity() {
             "requestPermission" -> requestPermission(call.arguments as String, result)
             "setTraining" -> { training = call.arguments as Boolean; result.success(null) }
             "teacherReady" -> result.success(teacherFile.exists())
-            "downloadTeacher" -> teacherThread.execute {
-                try {
-                    teacherFile.parentFile?.mkdirs()
-                    TeacherDepth.download(teacherFile) { p -> emit(mapOf("type" to "download", "progress" to p.toDouble())) }
-                    reply(result, true)
-                } catch (e: Exception) {
-                    main.post { result.error("download", e.message, null) }
-                }
+            "getFlag" -> result.success(prefs.getBoolean(call.arguments as String, false))
+            "setFlag" -> {
+                prefs.edit().putBoolean(call.arguments as String, true).apply()
+                result.success(null)
+            }
+            "downloadTeacher" -> submit(teacherThread, "download", result) {
+                teacherFile.parentFile?.mkdirs()
+                TeacherDepth.download(teacherFile) { p -> emit(mapOf("type" to "download", "progress" to p.toDouble())) }
+                reply(result, true)
             }
             "teach" -> teach(call.arguments as ByteArray, result)
-            "save" -> brainThread.execute { brain?.save(); reply(result, null) }
-            "reset" -> brainThread.execute { brain?.reset(); reply(result, null) }
+            "save" -> submit(brainThread, "save", result) { brain?.save(); reply(result, null) }
+            "reset" -> submit(brainThread, "reset", result) { brain?.reset(); reply(result, null) }
             else -> result.notImplemented()
         }
     }
@@ -121,19 +132,15 @@ class MainActivity : FlutterActivity() {
     private fun teach(rgb: ByteArray, result: MethodChannel.Result) {
         val stack = latestStack
         if (stack == null) { result.error("sonar", "sonar not running", null); return }
-        teacherThread.execute {
-            try {
-                val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
-                val depth = t.run(rgb)
-                brainThread.execute {
-                    val b = brain ?: return@execute
-                    b.addSample(stack, depth)
-                    b.train(TRAIN_STEPS_PER_SAMPLE)
-                }
-                reply(result, depth)
-            } catch (e: Exception) {
-                main.post { result.error("teacher", e.message, null) }
+        submit(teacherThread, "teacher", result) {
+            val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
+            val depth = t.run(rgb)
+            submit(brainThread, "training") {
+                val b = brain ?: return@submit
+                b.addSample(stack, depth)
+                b.train(TRAIN_STEPS_PER_SAMPLE)
             }
+            reply(result, depth)
         }
     }
 
@@ -146,14 +153,14 @@ class MainActivity : FlutterActivity() {
         )
         // Inference rides along with the ping when the brain is idle; dropped otherwise.
         if (!inferBusy.compareAndSet(false, true)) { emit(event); return }
-        brainThread.execute {
+        val queued = submit(brainThread, "inference") {
             try {
                 val b = brain
                 if (b != null) {
                     event["depth"] = b.infer(stack)
                     event["steps"] = b.trainedSteps
                     event["loss"] = b.lastLoss.toDouble()
-                    event["samples"] = b.sampleCount
+                    event["samples"] = b.totalSamples
                     // Keep learning from the replay buffer between camera frames.
                     if (training) b.train(1)
                 }
@@ -162,6 +169,42 @@ class MainActivity : FlutterActivity() {
             }
             emit(event)
         }
+        if (!queued) inferBusy.set(false)
+    }
+
+    /**
+     * Runs [task] on [executor]; any failure is logged, sent to Dart as an error event and,
+     * when [result] is given, returned as a channel error. Returns false if not queued.
+     */
+    private fun submit(
+        executor: ExecutorService,
+        what: String,
+        result: MethodChannel.Result? = null,
+        task: () -> Unit,
+    ): Boolean = try {
+        executor.execute {
+            try {
+                task()
+            } catch (t: Throwable) {
+                Log.e(TAG, "$what failed", t)
+                reportError("$what failed: ${t.message ?: t.javaClass.simpleName}")
+                if (result != null) main.post { result.error(what, t.message, null) }
+            }
+        }
+        true
+    } catch (e: RejectedExecutionException) {
+        false // activity is shutting down
+    }
+
+    @Volatile private var lastError = ""
+    @Volatile private var lastErrorAt = 0L
+
+    /** Sends an error to the UI, at most once per 3 s per message (inference runs ~20x/s). */
+    private fun reportError(message: String) {
+        val now = System.currentTimeMillis()
+        if (message == lastError && now - lastErrorAt < 3000) return
+        lastError = message; lastErrorAt = now
+        emit(mapOf("type" to "error", "message" to message))
     }
 
     private fun emit(event: Map<String, Any>) = main.post { sink?.success(event) }
@@ -170,18 +213,19 @@ class MainActivity : FlutterActivity() {
     override fun onPause() {
         super.onPause()
         sonar?.stop()
-        brainThread.execute { brain?.save() }
+        submit(brainThread, "save") { brain?.save() }
     }
 
     override fun onDestroy() {
         sonar?.stop()
-        brainThread.execute { brain?.close() }
-        teacherThread.execute { teacher?.close() }
+        submit(brainThread, "close") { brain?.close() }
+        submit(teacherThread, "close") { teacher?.close() }
         brainThread.shutdown(); teacherThread.shutdown()
         super.onDestroy()
     }
 
     companion object {
+        private const val TAG = "Murdock"
         private const val TRAIN_STEPS_PER_SAMPLE = 4
         private const val PERMISSION_REQUEST_BASE = 4100
     }

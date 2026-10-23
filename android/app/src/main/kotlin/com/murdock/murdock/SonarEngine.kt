@@ -36,6 +36,7 @@ import kotlin.math.sqrt
 class SonarEngine(
     private val context: Context,
     private val onPing: (profile: FloatArray, stack: FloatArray, directLevel: Float) -> Unit,
+    private val onError: (String) -> Unit,
 ) {
     @Volatile private var running = false
     private var playThread: Thread? = null
@@ -51,8 +52,10 @@ class SonarEngine(
     fun start() {
         if (running) return
         running = true
-        playThread = Thread(::playLoop, "sonar-play").apply { priority = Thread.MAX_PRIORITY; start() }
-        recordThread = Thread(::recordLoop, "sonar-record").apply { priority = Thread.MAX_PRIORITY; start() }
+        playThread = Thread({ guarded("speaker", ::playLoop) }, "sonar-play")
+            .apply { priority = Thread.MAX_PRIORITY; start() }
+        recordThread = Thread({ guarded("microphone", ::recordLoop) }, "sonar-record")
+            .apply { priority = Thread.MAX_PRIORITY; start() }
     }
 
     fun stop() {
@@ -61,6 +64,17 @@ class SonarEngine(
         recordThread?.join(500)
         playThread = null
         recordThread = null
+    }
+
+    /** An exception escaping a raw Thread kills the app, so report it and stop instead. */
+    private fun guarded(what: String, loop: () -> Unit) {
+        try {
+            loop()
+        } catch (t: Throwable) {
+            Log.e(TAG, "$what failed", t)
+            running = false
+            onError("$what failed: ${t.message ?: t.javaClass.simpleName}")
+        }
     }
 
     private fun playLoop() {
@@ -131,9 +145,7 @@ class SonarEngine(
     }
 
     private fun recordLoop() {
-        val rec = try { openRecorder() } catch (e: Exception) {
-            Log.e(TAG, "cannot record", e); running = false; return
-        }
+        val rec = openRecorder()
         val inChannels = if (stereo) 2 else 1
         val chunk = FloatArray(PING_PERIOD * inChannels)
         // De-interleaved rolling buffer with absolute sample indexing.

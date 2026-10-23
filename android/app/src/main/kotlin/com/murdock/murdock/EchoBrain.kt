@@ -24,20 +24,31 @@ class EchoBrain(
     private val weightsFile: File,
     private val samplesDir: File,
 ) {
-    private var interpreter = open()
     private val replay = ArrayList<Pair<FloatArray, FloatArray>>()
     private var sampleOut: FileOutputStream? = null
 
+    // Lifetime counters, persisted next to the weights so progress survives restarts.
     var trainedSteps = 0; private set
+    var totalSamples = 0; private set
     var lastLoss = Float.NaN; private set
     val sampleCount get() = replay.size
+
+    // Declared after the counters: open() restores them, and Kotlin runs initializers in order.
+    private var interpreter = open()
     var recordToDisk = true
+
+    private val metaFile get() = File(weightsFile.path + ".meta")
 
     private fun open(): Interpreter {
         modelBytes.rewind()
         val it = Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
         if (weightsFile.exists()) {
-            try { restore(it) } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
+            try {
+                restore(it)
+                metaFile.takeIf { f -> f.exists() }?.readText()?.trim()?.split(" ")?.let { (steps, samples) ->
+                    trainedSteps = steps.toInt(); totalSamples = samples.toInt()
+                }
+            } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
         }
         return it
     }
@@ -52,6 +63,7 @@ class EchoBrain(
     fun addSample(stack: FloatArray, depth: FloatArray) {
         if (replay.size >= MAX_REPLAY) replay.removeAt(Random.nextInt(replay.size))
         replay.add(stack to depth)
+        totalSamples++
         if (recordToDisk) {
             val out = sampleOut ?: FileOutputStream(
                 File(samplesDir.apply { mkdirs() }, "session_${System.currentTimeMillis()}.mdk")
@@ -90,7 +102,9 @@ class EchoBrain(
             direct(interpreter.getOutputTensorFromSignature(it, "get_weights").numBytes() / 4)
         }
         interpreter.runSignature(mapOf("dummy" to direct(1)), outputs, "get_weights")
-        DataOutputStream(weightsFile.outputStream().buffered()).use { out ->
+        weightsFile.parentFile?.mkdirs()
+        val tmp = File(weightsFile.path + ".tmp")
+        DataOutputStream(tmp.outputStream().buffered()).use { out ->
             out.writeInt(outputs.size)
             for ((_, buf) in outputs) {
                 buf.rewind()
@@ -98,6 +112,8 @@ class EchoBrain(
                 val bytes = ByteArray(buf.remaining()); buf.get(bytes); out.write(bytes)
             }
         }
+        tmp.renameTo(weightsFile) // atomic: a crash mid-save can't leave a corrupt file
+        metaFile.writeText("$trainedSteps $totalSamples")
         sampleOut?.flush()
     }
 
@@ -119,10 +135,12 @@ class EchoBrain(
     /** Forget on-device training: back to the weights shipped in the asset. */
     fun reset() {
         weightsFile.delete()
+        metaFile.delete()
         interpreter.close()
         interpreter = open()
         replay.clear()
         trainedSteps = 0
+        totalSamples = 0
         lastLoss = Float.NaN
     }
 

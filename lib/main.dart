@@ -19,8 +19,8 @@ class MurdockApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           brightness: Brightness.dark,
-          scaffoldBackgroundColor: Colors.black,
-          colorScheme: const ColorScheme.dark(primary: Color(0xFFFF2457)),
+          scaffoldBackgroundColor: const Color(0xFF05060A),
+          colorScheme: const ColorScheme.dark(primary: Color(0xFFFF2457), surface: Color(0xFF05060A)),
           fontFamily: 'monospace',
         ),
         home: const HomePage(),

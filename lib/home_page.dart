@@ -11,8 +11,13 @@ import 'render/vision_renderer.dart';
 import 'render/vision_view.dart';
 import 'sonar/sonar_channel.dart';
 import 'train/camera_teacher.dart';
+import 'ui/guide.dart';
+import 'ui/hud.dart';
 
-enum Mode { vision, scope, train }
+enum Mode { see, radar, teach }
+
+/// Camera-labelled samples that count as "fully taught" for one room (~6 min at 4 fps).
+const int kTeachGoal = 1500;
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -26,85 +31,112 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final _vision = VisionRenderer();
   final _teacherView = VisionRenderer();
   final _camera = CameraTeacher();
-  StreamSubscription<SonarFrame>? _sub;
+  final List<StreamSubscription<Object?>> _subs = [];
 
-  Mode _mode = Mode.vision;
+  Mode _mode = Mode.radar;
   SightPalette _palette = SightPalette.radar;
   SonarStatus? _status;
-  SonarFrame? _last;
-  String? _error;
+  String? _blocker;
   double? _download;
-  int _pings = 0;
-  double _pingRate = 0;
-  Timer? _rateTimer;
+  bool _teaching = false;
+  double _signal = 0;
+  int _samples = 0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _sub = _sonar.frames.listen((f) {
-      _pings++;
-      _last = f;
+    _subs.add(_sonar.frames.listen((f) {
+      _signal = _signal * 0.9 + f.signal * 0.1;
+      _samples = f.samples;
       final d = f.depth;
       if (d != null) _vision.update(d);
-    });
-    _sonar.downloadProgress.listen((p) => setState(() => _download = p));
-    _rateTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      _pingRate = _pings.toDouble();
-      _pings = 0;
-      if (!mounted) return;
-      _status = await _sonar.status();
-      if (mounted) setState(() {});
-    });
-    _startSonar();
+    }));
+    _subs.add(_sonar.downloadProgress.listen((p) => setState(() => _download = p)));
+    _subs.add(_sonar.errors.listen(_toast));
+    _subs.add(Stream.periodic(const Duration(milliseconds: 700)).listen((_) => _refresh()));
+    _boot();
+  }
+
+  Future<void> _boot() async {
+    if (!await _sonar.getFlag('guideSeen')) {
+      await _openGuide();
+      await _sonar.setFlag('guideSeen');
+    }
+    await _startSonar();
+    final s = await _sonar.status();
+    // Send new users to the place they need to start.
+    if (s.totalSamples >= kTeachGoal ~/ 3 && mounted) setState(() => _mode = Mode.see);
+  }
+
+  Future<void> _openGuide() =>
+      Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => GuidePage(palette: _palette)));
+
+  Future<void> _refresh() async {
+    if (!mounted) return;
+    final s = await _sonar.status();
+    if (mounted) setState(() => _status = s);
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: const Color(0xFF16080C),
+      behavior: SnackBarBehavior.floating,
+      content: Text(message, style: Hud.label(_palette.hot, size: 11)),
+    ));
   }
 
   Future<void> _startSonar() async {
     if (!await _sonar.requestPermission('microphone')) {
-      setState(() => _error = 'Microphone permission is needed: the mic is the sensor.');
+      setState(() => _blocker = 'Murdock needs the microphone: it is the sensor that hears the echoes.\n\n'
+          'Allow microphone access in Android settings, then reopen the app.');
       return;
     }
-    await WakelockPlus.enable();
+    // Keeping the screen on is a nicety; never let it block the sonar.
+    await WakelockPlus.enable().catchError((Object _) {});
     await _sonar.start();
-    setState(() => _error = null);
+    if (mounted) setState(() => _blocker = null);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Native side stops the speaker on pause; bring it back on resume.
+    // The native side stops the speaker when the app is backgrounded; resume it here.
     if (state == AppLifecycleState.resumed) {
       _startSonar();
-      if (_mode == Mode.train) _startTraining();
     } else if (state == AppLifecycleState.paused) {
-      _stopTraining();
+      _setTeaching(false);
     }
   }
 
   Future<void> _setMode(Mode m) async {
     if (m == _mode) return;
-    if (_mode == Mode.train) await _stopTraining();
+    if (_mode == Mode.teach) await _setTeaching(false);
     setState(() => _mode = m);
-    if (m == Mode.train) await _startTraining();
   }
 
-  Future<void> _startTraining() async {
-    if (!await _sonar.teacherReady()) return; // UI offers the download.
-    if (!await _sonar.requestPermission('camera')) {
-      setState(() => _error = 'Camera permission is needed to teach the echo model.');
-      return;
+  Future<void> _setTeaching(bool on) async {
+    if (on == _teaching) return;
+    if (on) {
+      if (!await _sonar.requestPermission('camera')) {
+        _toast('Camera permission is needed to teach.');
+        return;
+      }
+      setState(() => _teaching = true);
+      await _sonar.setTraining(true);
+      try {
+        await _camera.start((Uint8List rgb) async => _teacherView.update(await _sonar.teach(rgb)));
+      } catch (e) {
+        _toast('Camera failed: $e');
+        await _setTeaching(false);
+        return;
+      }
+    } else {
+      setState(() => _teaching = false);
+      await _sonar.setTraining(false);
+      await _camera.stop();
+      await _sonar.save();
     }
-    await _sonar.setTraining(true);
-    await _camera.start((Uint8List rgb) async {
-      final depth = await _sonar.teach(rgb);
-      _teacherView.update(depth);
-    });
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _stopTraining() async {
-    await _sonar.setTraining(false);
-    await _camera.stop();
-    await _sonar.save();
     if (mounted) setState(() {});
   }
 
@@ -112,191 +144,284 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _download = 0);
     try {
       await _sonar.downloadTeacher();
-      await _startTraining();
     } catch (e) {
-      setState(() => _error = 'Download failed: $e');
+      _toast('Download failed: $e');
     }
-    setState(() => _download = null);
+    if (mounted) setState(() => _download = null);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _sub?.cancel();
-    _rateTimer?.cancel();
+    for (final s in _subs) {
+      s.cancel();
+    }
     _camera.stop();
     _sonar.stop();
-    WakelockPlus.disable();
+    WakelockPlus.disable().catchError((Object _) {});
     super.dispose();
   }
 
+  double get _taught => (_status?.totalSamples ?? _samples) / kTeachGoal;
+
   @override
-  Widget build(BuildContext context) {
-    final accent = _palette.accent;
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _topBar(accent),
-            Expanded(child: _body()),
-            _statusLine(accent),
-          ],
-        ),
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: Hud.bg,
+        body: Stack(children: [
+          Positioned.fill(child: _blocker != null ? _centerCard(_blocker!) : _body()),
+          Positioned(left: 0, right: 0, top: 0, child: SafeArea(child: _topBar())),
+          Positioned(left: 0, right: 0, bottom: 0, child: SafeArea(child: _navBar())),
+        ]),
+      );
+
+  // ───────────────────────────── chrome ─────────────────────────────
+
+  Widget _topBar() {
+    final p = _palette;
+    final signal = _signal;
+    final signalText = signal > 0.6 ? 'ECHO STRONG' : signal > 0.3 ? 'ECHO OK' : signal > 0.08 ? 'ECHO WEAK' : 'NO ECHO';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+      child: Row(children: [
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('MURDOCK', style: Hud.title(p.accent, size: 18).copyWith(fontWeight: FontWeight.w500, letterSpacing: 6)),
+          const SizedBox(height: 4),
+          Row(children: [
+            SignalBars(value: signal, palette: p, caption: signalText),
+            const SizedBox(width: 14),
+            Text('BRAIN ${(_taught.clamp(0, 1) * 100).round()}%', style: Hud.label(p.accent, size: 9)),
+          ]),
+        ]),
+        const Spacer(),
+        _iconButton(Icons.palette_outlined, 'Switch colour',
+            () => setState(() => _palette = _palette == SightPalette.radar ? SightPalette.sonar : SightPalette.radar)),
+        _iconButton(Icons.help_outline, 'How it works', _openGuide),
+      ]),
+    );
+  }
+
+  Widget _iconButton(IconData icon, String tip, VoidCallback onTap) =>
+      IconButton(tooltip: tip, onPressed: onTap, icon: Icon(icon, color: _palette.accent.withValues(alpha: 0.85)));
+
+  Widget _navBar() {
+    const items = [
+      (Mode.see, Icons.visibility_outlined, 'SEE'),
+      (Mode.radar, Icons.radar, 'RADAR'),
+      (Mode.teach, Icons.school_outlined, 'TEACH'),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: HudPanel(
+        palette: _palette,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(children: [
+          for (final (mode, icon, label) in items)
+            Expanded(
+              child: InkWell(
+                onTap: () => _setMode(mode),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(children: [
+                    Icon(icon,
+                        color: mode == _mode ? _palette.accent : Hud.dim,
+                        shadows: mode == _mode ? [Shadow(color: _palette.accent, blurRadius: 12)] : null),
+                    const SizedBox(height: 4),
+                    Text(label, style: Hud.label(mode == _mode ? _palette.accent : Hud.dim, size: 10)),
+                  ]),
+                ),
+              ),
+            ),
+        ]),
       ),
     );
   }
 
-  Widget _topBar(Color accent) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Row(
-          children: [
-            for (final m in Mode.values)
-              TextButton(
-                onPressed: () => _setMode(m),
-                child: Text(m.name.toUpperCase(),
-                    style: TextStyle(
-                      color: m == _mode ? accent : accent.withValues(alpha: 0.4),
-                      letterSpacing: 3,
-                      fontWeight: m == _mode ? FontWeight.bold : FontWeight.normal,
-                    )),
-              ),
-            const Spacer(),
-            IconButton(
-              tooltip: 'Switch look',
-              icon: Icon(Icons.blur_on, color: accent),
-              onPressed: () => setState(() =>
-                  _palette = _palette == SightPalette.radar ? SightPalette.sonar : SightPalette.radar),
-            ),
-          ],
-        ),
-      );
-
-  Widget _body() {
-    final err = _error;
-    if (err != null) return _message(err);
-    switch (_mode) {
-      case Mode.vision:
-        final untrained = (_status?.steps ?? 0) == 0;
-        return Stack(children: [
-          VisionView(
-            renderer: _vision,
-            palette: _palette,
-            placeholder: 'LISTENING…\nTurn media volume up.',
-          ),
-          if (untrained)
-            Positioned(
-              left: 16,
-              right: 16,
-              bottom: 8,
-              child: Text(
-                'Model not trained on this phone yet: the picture is noise until you use TRAIN '
-                'with the lights on (or load a model trained on a PC). SCOPE shows the raw echoes.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: _palette.accent.withValues(alpha: 0.7), fontSize: 11),
-              ),
-            ),
-        ]);
-      case Mode.scope:
-        return ScopeView(frames: _sonar.frames, palette: _palette);
-      case Mode.train:
-        return _trainBody();
-    }
-  }
-
-  Widget _trainBody() {
-    final status = _status;
-    final cam = _camera.controller;
-    if (status != null && !status.teacherReady) {
-      final p = _download;
-      return _message(
-        'Training uses the camera as a teacher: a depth model (MiDaS v2.1 small, ~66 MB) '
-        'labels what the camera sees, and the echo model learns to predict that from sound.',
-        action: p == null
-            ? OutlinedButton(onPressed: _downloadTeacher, child: const Text('DOWNLOAD DEPTH TEACHER'))
-            : LinearProgressIndicator(value: p, color: _palette.accent),
-      );
-    }
-    return Column(
-      children: [
-        Expanded(
-          child: Row(children: [
-            Expanded(child: _panel('CAMERA', cam != null && cam.value.isInitialized
-                ? ClipRect(child: AspectRatio(aspectRatio: 1, child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: cam.value.previewSize?.height ?? 1,
-                      height: cam.value.previewSize?.width ?? 1,
-                      child: CameraPreview(cam)))))
-                : const SizedBox())),
-            Expanded(child: _panel('TEACHER (CAMERA DEPTH)',
-                VisionView(renderer: _teacherView, palette: _palette, placeholder: 'WAITING…'))),
+  /// One-line "what is this / what do I do" banner under the top bar.
+  Widget _hint(String what, String todo) => Positioned(
+        left: 16,
+        right: 16,
+        top: MediaQuery.paddingOf(context).top + 76,
+        child: HudPanel(
+          palette: _palette,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(what, style: Hud.label(_palette.accent, size: 10)),
+            const SizedBox(height: 4),
+            Text(todo, style: Hud.body.copyWith(fontSize: 12.5)),
           ]),
         ),
-        Expanded(child: _panel('STUDENT (ECHO ONLY)', VisionView(renderer: _vision, palette: _palette))),
-        Padding(
-          padding: const EdgeInsets.all(8),
-          child: Text(
-            'Walk slowly around a lit room pointing the phone at walls, furniture and people. '
-            'When the student panel resembles the teacher, switch the lights off and use VISION.\n'
-            'Samples also saved for PC training: ${status?.samplesDir ?? ''}',
-            style: TextStyle(color: _palette.accent.withValues(alpha: 0.7), fontSize: 11),
-          ),
-        ),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          TextButton(onPressed: _sonar.save, child: const Text('SAVE BRAIN')),
-          TextButton(
-            onPressed: () async {
-              await _sonar.reset();
-              _vision.update(Float32List(kDepthSize * kDepthSize));
-            },
-            child: const Text('RESET BRAIN'),
-          ),
-        ]),
-      ],
-    );
-  }
-
-  Widget _panel(String title, Widget child) => Container(
-        margin: const EdgeInsets.all(4),
-        decoration: BoxDecoration(border: Border.all(color: _palette.accent.withValues(alpha: 0.35))),
-        child: Stack(children: [
-          Positioned.fill(child: child),
-          Positioned(
-            left: 6,
-            top: 4,
-            child: Text(title, style: TextStyle(color: _palette.accent, fontSize: 10, letterSpacing: 2)),
-          ),
-        ]),
       );
 
-  Widget _message(String text, {Widget? action}) => Center(
+  Widget _centerCard(String text, {Widget? action, Widget? top}) => Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(text, textAlign: TextAlign.center, style: TextStyle(color: _palette.accent, height: 1.5)),
-            if (action != null) ...[const SizedBox(height: 20), action],
-          ]),
+          child: HudPanel(
+            palette: _palette,
+            padding: const EdgeInsets.all(22),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (top != null) ...[top, const SizedBox(height: 18)],
+              Text(text, textAlign: TextAlign.center, style: Hud.body),
+              if (action != null) ...[const SizedBox(height: 20), action],
+            ]),
+          ),
         ),
       );
 
-  Widget _statusLine(Color accent) {
-    final s = _status;
-    final f = _last;
-    final loss = f?.loss ?? double.nan;
-    final parts = [
-      '${_pingRate.toStringAsFixed(0)} PING/S',
-      if (f != null) 'DIRECT ${f.direct.toStringAsFixed(2)}',
-      if (s != null) s.stereo ? 'STEREO' : 'MONO',
-      if (s != null && s.source.isNotEmpty) s.source.toUpperCase(),
-      'STEPS ${f?.steps ?? s?.steps ?? 0}',
-      if (!loss.isNaN) 'LOSS ${loss.toStringAsFixed(3)}',
-      'SAMPLES ${f?.samples ?? s?.samples ?? 0}',
-    ];
+  // ───────────────────────────── screens ─────────────────────────────
+
+  Widget _body() => switch (_mode) {
+        Mode.see => _seeScreen(),
+        Mode.radar => _radarScreen(),
+        Mode.teach => _teachScreen(),
+      };
+
+  Widget _seeScreen() {
+    if (_taught < 0.15) {
+      return _centerCard(
+        'The AI hasn\'t learned your surroundings yet, so this view would only show noise.\n\n'
+        'Go to TEACH and walk around a lit room for a few minutes first.',
+        top: ScanSweep(palette: _palette, size: 110),
+        action: GlowButton(label: 'TEACH NOW', icon: Icons.school_outlined, palette: _palette, filled: true,
+            onTap: () => _setMode(Mode.teach)),
+      );
+    }
+    return Stack(children: [
+      Positioned.fill(child: VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…')),
+      _hint('SEE · SOUND-ONLY VISION', 'Lights off. Brighter = closer. Move the phone slowly.'),
+    ]);
+  }
+
+  Widget _radarScreen() => Stack(children: [
+        Positioned.fill(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 150, bottom: 96),
+            child: ScopeView(frames: _sonar.frames, palette: _palette),
+          ),
+        ),
+        _hint('RADAR · RAW ECHOES, NO AI',
+            'Bottom = your phone. Each arc is something reflecting sound; higher = further. '
+            'Top strip: echo history. Walk toward a wall to see it move.'),
+      ]);
+
+  Widget _teachScreen() {
+    final p = _palette;
+    final status = _status;
+    if (status != null && !status.teacherReady) {
+      final d = _download;
+      return _centerCard(
+        'To learn, Murdock uses the camera as a teacher: a vision AI works out how far '
+        'everything is, and the echo AI learns to match it.\n\n'
+        'This needs a one-time 66 MB download. It runs fully on your phone afterwards.',
+        top: Icon(Icons.download_for_offline_outlined, color: p.accent, size: 48),
+        action: d == null
+            ? GlowButton(label: 'DOWNLOAD TEACHER', icon: Icons.download, palette: p, filled: true, onTap: _downloadTeacher)
+            : Column(children: [
+                LinearProgressIndicator(value: d, color: p.accent, backgroundColor: p.accent.withValues(alpha: 0.15)),
+                const SizedBox(height: 8),
+                Text('${(d * 100).round()}%', style: Hud.label(p.accent)),
+              ]),
+      );
+    }
+    final cam = _camera.controller;
+    final taught = _taught.clamp(0.0, 1.0);
     return Padding(
-      padding: const EdgeInsets.all(6),
-      child: Text(parts.join('  ·  '),
-          textAlign: TextAlign.center,
-          style: TextStyle(color: accent.withValues(alpha: 0.75), fontSize: 10, letterSpacing: 1)),
+      padding: const EdgeInsets.fromLTRB(16, 76, 16, 100),
+      child: Column(children: [
+        HudPanel(
+          palette: p,
+          child: Row(children: [
+            ProgressRing(
+              value: taught,
+              palette: p,
+              size: 96,
+              center: '${(taught * 100).round()}%',
+              caption: 'TAUGHT',
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(_teaching ? 'TEACHING…' : taught >= 1 ? 'READY FOR THE DARK' : 'HOW TO TEACH',
+                    style: Hud.label(p.accent, size: 11)),
+                const SizedBox(height: 6),
+                Text(
+                  _teaching
+                      ? 'Walk slowly. Point at walls, doors, furniture, people. Keep the lights on.'
+                      : taught >= 1
+                          ? 'Turn the lights off and open SEE. Teach again in each new room.'
+                          : '1  Lights on\n2  Press START\n3  Walk slowly around the room until 100%',
+                  style: Hud.body.copyWith(fontSize: 12.5),
+                ),
+              ]),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: Row(children: [
+            Expanded(
+              child: _feed('WHAT THE CAMERA SEES', _teaching && cam != null && cam.value.isInitialized
+                  ? FittedBox(
+                      fit: BoxFit.cover,
+                      clipBehavior: Clip.hardEdge,
+                      child: SizedBox(
+                        width: cam.value.previewSize?.height ?? 1,
+                        height: cam.value.previewSize?.width ?? 1,
+                        child: CameraPreview(cam),
+                      ),
+                    )
+                  : Center(child: Icon(Icons.videocam_off_outlined, color: Hud.dim))),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _feed('WHAT THE ECHO AI SEES',
+                  VisionView(renderer: _vision, palette: p, placeholder: 'LISTENING…')),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 14),
+        GlowButton(
+          label: _teaching ? 'PAUSE' : 'START TEACHING',
+          icon: _teaching ? Icons.pause : Icons.play_arrow,
+          filled: !_teaching,
+          palette: p,
+          onTap: () => _setTeaching(!_teaching),
+        ),
+        TextButton(
+          onPressed: _confirmReset,
+          child: Text('FORGET EVERYTHING', style: Hud.label(Hud.dim, size: 9)),
+        ),
+      ]),
     );
+  }
+
+  Widget _feed(String title, Widget child) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: Hud.label(_palette.accent, size: 9)),
+        const SizedBox(height: 6),
+        Expanded(
+          child: Container(
+            decoration: BoxDecoration(border: Border.all(color: _palette.accent.withValues(alpha: 0.3))),
+            child: ClipRect(child: SizedBox.expand(child: child)),
+          ),
+        ),
+      ]);
+
+  Future<void> _confirmReset() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF0B0D14),
+        title: Text('FORGET EVERYTHING?', style: Hud.label(_palette.accent, size: 13)),
+        content: const Text('The echo AI loses everything it learned on this phone.', style: Hud.body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('FORGET')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _setTeaching(false);
+    await _sonar.reset();
+    _vision.update(Float32List(kDepthSize * kDepthSize));
+    _toast('Brain reset.');
   }
 }

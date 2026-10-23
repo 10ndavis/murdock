@@ -1,0 +1,140 @@
+import 'package:flutter/material.dart';
+
+import '../render/palette.dart';
+import 'hud.dart';
+
+/// "How does this work / what do I do" walkthrough. Shown on first launch and from the ? button.
+class GuidePage extends StatefulWidget {
+  const GuidePage({super.key, required this.palette});
+
+  final SightPalette palette;
+
+  @override
+  State<GuidePage> createState() => _GuidePageState();
+}
+
+class _Step {
+  const _Step(this.icon, this.kicker, this.title, this.body);
+
+  final IconData icon;
+  final String kicker;
+  final String title;
+  final String body;
+}
+
+const _steps = [
+  _Step(Icons.graphic_eq, 'HOW IT WORKS', 'Your phone becomes a bat',
+      'Murdock plays a very high-pitched chirp from your speaker about 20 times a second. '
+          'It bounces off walls, furniture and people, and your microphones hear the echoes.\n\n'
+          'Most adults can\'t hear it. Kids and pets might.\n\n'
+          'Turn your MEDIA VOLUME UP, and don\'t cover the speaker or mics.'),
+  _Step(Icons.radar, 'STEP 1 · RADAR', 'Check your phone can hear',
+      'Open RADAR. This is the raw sonar, with no AI involved.\n\n'
+          'Arcs show echoes: the further up the screen, the further away the object. '
+          'Walk toward a wall and watch the arc move toward you.\n\n'
+          'If the ECHO meter at the top stays empty, your phone\'s speaker or mic can\'t do high '
+          'frequencies and the rest of the app won\'t work well.'),
+  _Step(Icons.school, 'STEP 2 · TEACH', 'Train it with the lights on',
+      'Echoes alone don\'t say what things look like, so Murdock has to learn your rooms.\n\n'
+          'In TEACH, the camera shows an AI what the room looks like while the sonar listens. '
+          'The echo AI learns to match the two. Everything stays on your phone.\n\n'
+          'Lights ON. Walk slowly around the room for 5–10 minutes, pointing the phone at walls, '
+          'doorways, furniture and people. Fill the ring to 100%.'),
+  _Step(Icons.visibility, 'STEP 3 · SEE', 'See in the dark',
+      'Turn the lights off and open SEE. The picture now comes from sound only.\n\n'
+          'Brighter means closer. Outlines are edges of things. The pulse sweeping outward is each sonar ping.\n\n'
+          'Hold the phone up like a camera and move it slowly.'),
+  _Step(Icons.info_outline, 'BE REALISTIC', 'What to expect',
+      'Distance is the strong part: echoes measure it to a few centimetres.\n\n'
+          'Shapes are blurry, and left/right is rough. A phone has only a couple of microphones, '
+          'so the AI fills in detail from what it learned in your rooms.\n\n'
+          'It works best in rooms you taught it. A new room needs a new TEACH session.'),
+];
+
+class _GuidePageState extends State<GuidePage> {
+  final _pages = PageController();
+  int _index = 0;
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.palette;
+    final last = _index == _steps.length - 1;
+    return Scaffold(
+      backgroundColor: Hud.bg,
+      body: SafeArea(
+        child: Column(children: [
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('SKIP', style: Hud.label(p.accent.withValues(alpha: 0.7))),
+            ),
+          ),
+          Expanded(
+            child: PageView.builder(
+              controller: _pages,
+              itemCount: _steps.length,
+              onPageChanged: (i) => setState(() => _index = i),
+              itemBuilder: (_, i) {
+                final s = _steps[i];
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const SizedBox(height: 24),
+                    Container(
+                      padding: const EdgeInsets.all(18),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: p.accent, width: 1.5),
+                        boxShadow: [BoxShadow(color: p.accent.withValues(alpha: 0.5), blurRadius: 24)],
+                      ),
+                      child: Icon(s.icon, color: p.accent, size: 36),
+                    ),
+                    const SizedBox(height: 28),
+                    Text(s.kicker, style: Hud.label(p.accent, size: 11)),
+                    const SizedBox(height: 10),
+                    Text(s.title, style: Hud.title(Hud.text, size: 28)),
+                    const SizedBox(height: 20),
+                    Text(s.body, style: Hud.body.copyWith(fontSize: 15)),
+                  ]),
+                );
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Row(children: [
+              for (var i = 0; i < _steps.length; i++)
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  width: i == _index ? 22 : 6,
+                  height: 6,
+                  margin: const EdgeInsets.only(right: 6),
+                  decoration: BoxDecoration(
+                    color: i == _index ? p.accent : p.accent.withValues(alpha: 0.25),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              const Spacer(),
+              GlowButton(
+                label: last ? 'START' : 'NEXT',
+                icon: last ? Icons.bolt : Icons.arrow_forward,
+                filled: last,
+                palette: p,
+                onTap: () => last
+                    ? Navigator.pop(context)
+                    : _pages.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeOut),
+              ),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+}

@@ -27,8 +27,22 @@ class SonarFrame {
   final Float32List? depth;
   final double direct;
   final int steps;
+
   final double loss;
+
+  /// Lifetime number of camera-labelled samples.
   final int samples;
+
+  /// How clearly the chirp is heard, 0 (nothing) to 1 (strong).
+  ///
+  /// Each profile is normalised to the direct speaker->mic peak, so when the chirp is
+  /// heard well the far range bins sit far below it; when it isn't, the "peak" is just
+  /// noise and every bin looks the same.
+  double get signal {
+    final far = <double>[for (var b = kRangeBins ~/ 2; b < kRangeBins; b++) profile[b * kChannels]]..sort();
+    final median = far[far.length ~/ 2];
+    return ((0.85 - median) / 0.4).clamp(0.0, 1.0);
+  }
 }
 
 class SonarStatus {
@@ -37,6 +51,7 @@ class SonarStatus {
         source = m['source'] as String? ?? '',
         samples = m['samples'] as int? ?? 0,
         steps = m['steps'] as int? ?? 0,
+        totalSamples = m['totalSamples'] as int? ?? 0,
         teacherReady = m['teacherReady'] as bool? ?? false,
         samplesDir = m['samplesDir'] as String? ?? '';
 
@@ -44,6 +59,9 @@ class SonarStatus {
   final String source;
   final int samples;
   final int steps;
+
+  /// Camera-labelled samples this phone has ever learned from (persists across restarts).
+  final int totalSamples;
   final bool teacherReady;
   final String samplesDir;
 }
@@ -59,12 +77,17 @@ class SonarChannel {
   Stream<SonarFrame> get frames =>
       _raw.where((m) => m['type'] == 'ping').map(SonarFrame.new);
 
+  Stream<String> get errors => _raw.where((m) => m['type'] == 'error').map((m) => m['message']! as String);
+
   Stream<double> get downloadProgress =>
       _raw.where((m) => m['type'] == 'download').map((m) => (m['progress']! as num).toDouble());
 
   /// [name] is 'microphone' or 'camera'.
   Future<bool> requestPermission(String name) async =>
       await _method.invokeMethod<bool>('requestPermission', name) ?? false;
+
+  Future<bool> getFlag(String name) async => await _method.invokeMethod<bool>('getFlag', name) ?? false;
+  Future<void> setFlag(String name) => _method.invokeMethod('setFlag', name);
 
   Future<void> start() => _method.invokeMethod('start');
   Future<void> stop() => _method.invokeMethod('stop');
