@@ -70,6 +70,7 @@ Map<String, Object> _stats({bool broken = false}) => {
       'calibrations': 1,
       'volume': broken ? 0.3 : 0.9,
       'brain': 'ready',
+      'calibration': 'saved',
     };
 
 void _mockNative({required int samples, bool broken = false}) {
@@ -95,7 +96,7 @@ void _mockNative({required int samples, bool broken = false}) {
       sink.success(_stats(broken: broken));
       if (broken) return;
       for (var t = 0; t < 40; t++) {
-        sink.success({'type': 'ping', 'profile': _profile(t), 'direct': 3.2});
+        sink.success({'type': 'ping', 'profile': _profile(t), 'clean': _profile(t), 'direct': 3.2});
         sink.success({'type': 'brain', 'depth': _room(), 'samples': samples, 'steps': samples * 4, 'loss': 0.1});
       }
     }),

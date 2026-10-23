@@ -83,6 +83,7 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
             "stop" -> { sonar?.stop(); result.success(null) }
+            "calibrate" -> { sonar?.calibrate(); result.success(null) }
             "status" -> submit(brainThread, "status", result) {
                 val b = brain
                 val s = sonar
@@ -157,10 +158,10 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun onPing(profile: FloatArray, stack: FloatArray, directLevel: Float) {
+    private fun onPing(profile: FloatArray, clean: FloatArray, stack: FloatArray, directLevel: Float) {
         latestStack = stack
         // Raw echoes go straight to the UI: RADAR must work even if the AI can't run.
-        emit(mapOf("type" to "ping", "profile" to profile, "direct" to directLevel.toDouble()))
+        emit(mapOf("type" to "ping", "profile" to profile, "clean" to clean, "direct" to directLevel.toDouble()))
         // Inference rides along when the brain is idle; skipped otherwise.
         if (!inferBusy.compareAndSet(false, true)) return
         val queued = submit(brainThread, "echo AI") {

@@ -8,17 +8,25 @@ const int kRangeBins = 128;
 const int kChannels = 2;
 const int kDepthSize = 32;
 
-/// Metres per range bin: 12 samples at 48 kHz, round trip.
-const double kMetresPerBin = 12 / 48000 * 343 / 2;
+/// Feet per range bin: 12 samples at 48 kHz, round trip (343 m/s = 1125 ft/s).
+const double kFeetPerBin = 12 / 48000 * 1125.3 / 2;
+
+/// Furthest distance the sonar covers (~18 ft).
+const double kMaxFeet = kRangeBins * kFeetPerBin;
 
 /// One sonar ping: the raw echo profile. Sent for every ping, AI or not.
 class SonarFrame {
   SonarFrame(Map<Object?, Object?> m)
       : profile = m['profile']! as Float32List,
+        clean = (m['clean'] as Float32List?) ?? m['profile']! as Float32List,
         direct = (m['direct'] as num?)?.toDouble() ?? 0;
 
-  /// [kRangeBins x kChannels] interleaved, log-scaled echo strength in [0, 1].
+  /// [kRangeBins x kChannels] interleaved, log-scaled echo strength in [0, 1]. Raw: this
+  /// is what the AI sees, including the loud speaker->mic sound at distance 0.
   final Float32List profile;
+
+  /// Same layout, with the speaker's own sound cancelled: only real echoes. For display.
+  final Float32List clean;
   final double direct;
 
   /// How clearly the chirp is heard, 0 (nothing) to 1 (strong).
@@ -62,6 +70,7 @@ class SonarStats {
         pingsPerSec = m['pingsPerSec'] as int? ?? 0,
         calibrations = m['calibrations'] as int? ?? 0,
         volume = (m['volume'] as num?)?.toDouble() ?? 0,
+        calibration = m['calibration'] as String? ?? 'none',
         brain = m['brain'] as String? ?? '';
 
   final bool running;
@@ -77,6 +86,9 @@ class SonarStats {
 
   /// Media volume, 0..1.
   final double volume;
+
+  /// Speaker-cancellation state: none, calibrating, done (just now), saved (from disk).
+  final String calibration;
   final String brain;
 }
 
@@ -129,6 +141,9 @@ class SonarChannel {
   Future<void> setFlag(String name) => _method.invokeMethod('setFlag', name);
 
   Future<void> start() => _method.invokeMethod('start');
+  /// Re-learn the speaker's own sound (~2 s). Hold the phone away from everything.
+  Future<void> calibrate() => _method.invokeMethod('calibrate');
+
   Future<void> stop() => _method.invokeMethod('stop');
   Future<void> setTraining(bool on) => _method.invokeMethod('setTraining', on);
   Future<void> save() => _method.invokeMethod('save');

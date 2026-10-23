@@ -317,16 +317,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: EdgeInsets.fromLTRB(16, MediaQuery.paddingOf(context).top + 76, 16, 100),
         child: Column(children: [
           _hintPanel('RADAR · RAW ECHOES, NO AI',
-              'Hold the phone 50 cm from a wall: a bump appears in the ECHO TRACE near 0.5 m. '
-              'Step back and it slides right. That bump is the echo.'),
+              'Hold the phone 2 ft from a wall: a bump appears in the ECHO TRACE at about 2 ft. '
+              'Step back and it slides right. That bump is the echo. The phone\'s own speaker sound is '
+              'filtered out.'),
           const SizedBox(height: 10),
           Expanded(
             child: _broken
                 ? SingleChildScrollView(child: HudPanel(palette: _palette, child: _systemCheck()))
                 : ScopeView(frames: _sonar.frames, palette: _palette),
           ),
+          const SizedBox(height: 8),
+          _calibrateButton(),
         ]),
       );
+
+  /// Re-learn the speaker's own sound so it can be filtered out of the echoes.
+  Widget _calibrateButton() {
+    final busy = _stats?.calibration == 'calibrating';
+    return GlowButton(
+      label: busy ? 'LEARNING SPEAKER SOUND…' : 'RECALIBRATE SPEAKER',
+      icon: Icons.tune,
+      palette: _palette,
+      onTap: busy
+          ? null
+          : () async {
+              final go = await showDialog<bool>(
+                context: context,
+                builder: (c) => AlertDialog(
+                  backgroundColor: const Color(0xFF0B0D14),
+                  title: Text('RECALIBRATE SPEAKER', style: Hud.label(_palette.accent, size: 13)),
+                  content: const Text(
+                    'Murdock filters out the sound going straight from your speaker to your mic, so only '
+                    'real echoes are left.\n\nHold the phone up at arm\'s length, pointing at open space with '
+                    'nothing within 3 ft (not toward a wall or table). Keep still for 2 seconds.',
+                    style: Hud.body,
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL')),
+                    TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('START')),
+                  ],
+                ),
+              );
+              if (go == true) await _sonar.calibrate();
+            },
+    );
+  }
 
   Widget _systemCheck() => SystemCheck(stats: _stats, signal: _signal, lastError: _lastError, palette: _palette);
 

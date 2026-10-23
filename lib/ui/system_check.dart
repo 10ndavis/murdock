@@ -57,6 +57,12 @@ class SystemCheck extends StatelessWidget {
         : _Row('ECHO CLARITY', '$pct%', signal > 0.08 ? _Level.warn : _Level.bad,
             'Echoes are buried in noise. Raise the volume and try a quiet room. Some phones can\'t play or '
             'record this high a pitch at all.'));
+    rows.add(switch (s.calibration) {
+      'saved' || 'done' => const _Row('SPEAKER FILTER', 'calibrated', _Level.ok),
+      'calibrating' => const _Row('SPEAKER FILTER', 'learning… keep still', _Level.warn),
+      _ => const _Row('SPEAKER FILTER', 'not calibrated', _Level.warn,
+          'On RADAR, tap RECALIBRATE SPEAKER so the speaker\'s own sound isn\'t mistaken for an echo.'),
+    });
     rows.add(s.brain == 'ready'
         ? const _Row('ECHO AI', 'loaded', _Level.ok)
         : _Row('ECHO AI', s.brain, s.brain == 'loading' ? _Level.warn : _Level.bad));

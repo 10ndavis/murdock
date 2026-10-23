@@ -40,7 +40,7 @@ class _ScopeViewState extends State<ScopeView> {
   }
 
   void _onFrame(SonarFrame f) {
-    final p = f.profile;
+    final p = f.clean;
     for (var i = 0; i < p.length; i++) {
       _background[i] = _primed ? _background[i] * 0.97 + p[i] * 0.03 : p[i];
       _current[i] = p[i];
@@ -84,6 +84,12 @@ class _ScopeViewState extends State<ScopeView> {
       );
 }
 
+/// Distance markers, in feet.
+const _ticks = [3, 6, 9, 12, 15];
+
+/// Leftover speaker sound may remain this close even after cancellation.
+const double kSpeakerZoneFeet = 0.5;
+
 class _ScopePainter extends CustomPainter {
   _ScopePainter(this.waterfall, Float32List current, Float32List background, this.palette)
       : current = Float32List.fromList(current),
@@ -102,7 +108,8 @@ class _ScopePainter extends CustomPainter {
     final split = size.height * 0.46;
 
     // 1. Echo trace ("A-scan"): echo strength against distance for the latest ping.
-    //    The direct speaker->mic blast is at 0 m; every other peak is something reflecting.
+    //    The speaker's own sound is cancelled natively; what's left near 0 is residue,
+    //    shaded as the SPEAKER zone. Every peak beyond it is something reflecting.
     _text(canvas, 'ECHO TRACE', const Offset(0, 0), label);
     final trace = Path();
     final fill = Path()..moveTo(0, traceBottom);
@@ -117,6 +124,9 @@ class _ScopePainter extends CustomPainter {
       ..lineTo(size.width, traceBottom)
       ..close();
     canvas.drawPath(fill, Paint()..color = palette.accent.withValues(alpha: 0.12));
+    final deadX = kSpeakerZoneFeet / kMaxFeet * size.width;
+    canvas.drawRect(Rect.fromLTRB(0, 14, deadX, traceBottom), Paint()..color = Colors.white.withValues(alpha: 0.06));
+    _text(canvas, 'SPKR', Offset(2, traceBottom - 12), label.copyWith(fontSize: 8, color: Colors.white38));
     canvas.drawPath(
         trace,
         Paint()
@@ -143,9 +153,9 @@ class _ScopePainter extends CustomPainter {
         Paint()..filterQuality = FilterQuality.low,
       );
     }
-    for (final m in [1, 2, 3, 4, 5]) {
-      final x = m / (kRangeBins * kMetresPerBin) * size.width;
-      _text(canvas, '${m}m', Offset(x + 2, split - 14), label);
+    for (final ft in _ticks) {
+      final x = ft / kMaxFeet * size.width;
+      _text(canvas, '$ft ft', Offset(x + 2, split - 14), label);
       final tick = Paint()..color = palette.accent.withValues(alpha: 0.35);
       canvas.drawLine(Offset(x, 14), Offset(x, traceBottom), tick);
       canvas.drawLine(Offset(x, split - 16), Offset(x, split), Paint()..color = palette.accent);
@@ -158,8 +168,8 @@ class _ScopePainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = maxR / kRangeBins * 1.6
       ..strokeCap = StrokeCap.round;
-    // Skip the first bins: they are swamped by the direct speaker->mic sound.
-    for (var b = 6; b < kRangeBins; b++) {
+    // Skip the speaker zone: leftover speaker sound, not echoes.
+    for (var b = (kSpeakerZoneFeet / kFeetPerBin).ceil(); b < kRangeBins; b++) {
       final l = current[b * 2], r = current[b * 2 + 1];
       final v = (l + r) / 2;
       final moving = math.max(0.0, v - (background[b * 2] + background[b * 2 + 1]) / 2);
@@ -175,10 +185,10 @@ class _ScopePainter extends CustomPainter {
     final grid = Paint()
       ..style = PaintingStyle.stroke
       ..color = palette.accent.withValues(alpha: 0.25);
-    for (final m in [1, 2, 3, 4, 5]) {
-      final radius = m / (kRangeBins * kMetresPerBin) * maxR;
+    for (final ft in _ticks) {
+      final radius = ft / kMaxFeet * maxR;
       canvas.drawArc(Rect.fromCircle(center: origin, radius: radius), -math.pi, math.pi, false, grid);
-      _text(canvas, '${m}m', origin + Offset(radius + 2, -12), label);
+      _text(canvas, '$ft', origin + Offset(radius + 2, -12), label);
     }
   }
 

@@ -30,8 +30,10 @@ const _steps = [
           'Turn your MEDIA VOLUME UP, and don\'t cover the speaker or mics.'),
   _Step(Icons.radar, 'STEP 1 · RADAR', 'Check your phone can hear',
       'Open RADAR. This is the raw sonar, with no AI involved.\n\n'
-          'Arcs show echoes: the further up the screen, the further away the object. '
-          'Walk toward a wall and watch the arc move toward you.\n\n'
+          'The ECHO TRACE graph shows echo strength by distance. Hold the phone 2 ft from a wall: '
+          'a bump appears at about 2 ft. Step back and it slides right. That bump is the echo.\n\n'
+          'The first time, Murdock spends 2 seconds learning the sound that goes straight from your '
+          'speaker to your mic, so it can filter it out. If it ever looks wrong, tap RECALIBRATE SPEAKER.\n\n'
           'If the ECHO meter at the top stays empty, your phone\'s speaker or mic can\'t do high '
           'frequencies and the rest of the app won\'t work well.'),
   _Step(Icons.school, 'STEP 2 · TEACH', 'Train it with the lights on',
@@ -45,7 +47,7 @@ const _steps = [
           'Brighter means closer. Outlines are edges of things. The pulse sweeping outward is each sonar ping.\n\n'
           'Hold the phone up like a camera and move it slowly.'),
   _Step(Icons.info_outline, 'BE REALISTIC', 'What to expect',
-      'Distance is the strong part: echoes measure it to a few centimetres.\n\n'
+      'Distance is the strong part: echoes measure it to within about 2 inches, out to roughly 18 ft.\n\n'
           'Shapes are blurry, and left/right is rough. A phone has only a couple of microphones, '
           'so the AI fills in detail from what it learned in your rooms.\n\n'
           'It works best in rooms you taught it. A new room needs a new TEACH session.'),

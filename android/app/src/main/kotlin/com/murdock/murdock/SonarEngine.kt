@@ -35,7 +35,8 @@ import kotlin.math.sqrt
  */
 class SonarEngine(
     private val context: Context,
-    private val onPing: (profile: FloatArray, stack: FloatArray, directLevel: Float) -> Unit,
+    /** profile: raw echoes (model input); clean: speaker sound cancelled (for display). */
+    private val onPing: (profile: FloatArray, clean: FloatArray, stack: FloatArray, directLevel: Float) -> Unit,
     private val onError: (String) -> Unit,
     private val onStats: (Map<String, Any>) -> Unit,
 ) {
@@ -104,6 +105,7 @@ class SonarEngine(
             "calibrations" to calibrations,
             "direct" to lastDirect.toDouble(),
             "volume" to if (maxVol > 0) vol.toDouble() / maxVol else 0.0,
+            "calibration" to calibrationState,
         ))
         pings = 0
     }
@@ -217,6 +219,7 @@ class SonarEngine(
     }
 
     private fun recordLoop() {
+        if (!hasTemplate) loadTemplate()
         val rec = openRecorder()
         val inChannels = if (stereo) 2 else 1
         val chunk = ShortArray(PING_PERIOD * inChannels)
@@ -273,6 +276,8 @@ class SonarEngine(
                     avgDirect = best
                     weakPings = 0
                     calibrations++
+                    // First lock ever on this phone: learn the speaker sound automatically.
+                    if (!hasTemplate && calibratingLeft == 0) calibrate()
                     continue
                 }
 
@@ -302,19 +307,101 @@ class SonarEngine(
         }
     }
 
+    // ── Speaker (direct-path) cancellation ──────────────────────────────────────────────
+    // The chirp also reaches the mic straight from the speaker, through air and the phone's
+    // body. It is far louder than any echo and its ringing tail buries echoes from the first
+    // few feet. It is identical every ping (speaker and mic never move relative to each
+    // other), so we average its complex matched-filter response once ("calibration") and
+    // subtract it from every ping in the first CANCEL_LEN lags. Echoes are left untouched.
+    private val templateI = Array(CHANNELS) { FloatArray(CANCEL_LEN) }
+    private val templateQ = Array(CHANNELS) { FloatArray(CANCEL_LEN) }
+    @Volatile private var hasTemplate = false
+    @Volatile private var calibratingLeft = 0
+    @Volatile var calibrationState = "none"; private set
+    private val templateFile get() = java.io.File(context.filesDir, "speaker_template.bin")
+
+    /** Learn the speaker->mic sound over the next CALIBRATION_PINGS pings. */
+    fun calibrate() {
+        for (c in 0 until CHANNELS) { templateI[c].fill(0f); templateQ[c].fill(0f) }
+        calibrationState = "calibrating"
+        calibratingLeft = CALIBRATION_PINGS
+    }
+
+    private fun loadTemplate() {
+        val f = templateFile
+        if (!f.exists()) return
+        try {
+            java.io.DataInputStream(f.inputStream().buffered()).use { inp ->
+                for (c in 0 until CHANNELS) for (j in 0 until CANCEL_LEN) {
+                    templateI[c][j] = inp.readFloat(); templateQ[c][j] = inp.readFloat()
+                }
+            }
+            hasTemplate = true
+            calibrationState = "saved"
+        } catch (e: Exception) {
+            Log.w(TAG, "bad speaker template: $e")
+        }
+    }
+
+    private fun saveTemplate() {
+        java.io.DataOutputStream(templateFile.outputStream().buffered()).use { out ->
+            for (c in 0 until CHANNELS) for (j in 0 until CANCEL_LEN) {
+                out.writeFloat(templateI[c][j]); out.writeFloat(templateQ[c][j])
+            }
+        }
+    }
+
+    private val corrI = Array(CHANNELS) { FloatArray(RANGE_SAMPLES) }
+    private val corrQ = Array(CHANNELS) { FloatArray(RANGE_SAMPLES) }
+
     private fun emitPing(buf: Array<FloatArray>, direct: Int) {
-        val profile = history[historyHead]
-        var directLevel = 0f
+        val ci = SonarConfig.chirpIQ[0]
+        val cq = SonarConfig.chirpIQ[1]
+        // Complex matched filter for every lag in range, per mic.
         for (c in 0 until CHANNELS) {
             val x = buf[c]
-            val ref = max(env(x, direct), 1e-9f)
+            for (j in 0 until RANGE_SAMPLES) {
+                var i = 0f; var q = 0f
+                val at = direct + j
+                for (n in 0 until CHIRP_LEN) {
+                    val v = x[at + n]
+                    i += v * ci[n]; q += v * cq[n]
+                }
+                corrI[c][j] = i; corrQ[c][j] = q
+            }
+        }
+
+        if (calibratingLeft > 0) {
+            for (c in 0 until CHANNELS) for (j in 0 until CANCEL_LEN) {
+                templateI[c][j] += corrI[c][j] / CALIBRATION_PINGS
+                templateQ[c][j] += corrQ[c][j] / CALIBRATION_PINGS
+            }
+            if (--calibratingLeft == 0) {
+                hasTemplate = true
+                calibrationState = "done"
+                try { saveTemplate() } catch (e: Exception) { Log.w(TAG, "save template: $e") }
+            }
+        }
+
+        val profile = history[historyHead]
+        val clean = FloatArray(PROFILE_FLOATS)
+        val cancel = hasTemplate && calibratingLeft == 0
+        var directLevel = 0f
+        for (c in 0 until CHANNELS) {
+            val ref = max(hypot(corrI[c][0], corrQ[c][0]), 1e-9f)
             if (c == 0) directLevel = ref
             for (b in 0 until RANGE_BINS) {
-                var m = 0f
-                val start = direct + b * POOL
-                for (k in 0 until POOL) m = max(m, env(x, start + k))
-                val v = (log10(m / ref + LOG_FLOOR) + 4f) / 4f
-                profile[b * CHANNELS + c] = min(1f, max(0f, v))
+                var raw = 0f
+                var cleaned = 0f
+                for (k in 0 until POOL) {
+                    val j = b * POOL + k
+                    val i = corrI[c][j]; val q = corrQ[c][j]
+                    raw = max(raw, hypot(i, q))
+                    cleaned = max(cleaned,
+                        if (cancel && j < CANCEL_LEN) hypot(i - templateI[c][j], q - templateQ[c][j]) else hypot(i, q))
+                }
+                profile[b * CHANNELS + c] = logScale(raw / ref)
+                clean[b * CHANNELS + c] = logScale(cleaned / ref)
             }
         }
         historyHead = (historyHead + 1) % STACK
@@ -322,8 +409,12 @@ class SonarEngine(
         for (t in 0 until STACK) {
             System.arraycopy(history[(historyHead + t) % STACK], 0, stack, t * PROFILE_FLOATS, PROFILE_FLOATS)
         }
-        onPing(profile.copyOf(), stack, directLevel)
+        onPing(profile.copyOf(), clean, stack, directLevel)
     }
+
+    private fun logScale(v: Float) = min(1f, max(0f, (log10(v + LOG_FLOOR) + 4f) / 4f))
+
+    private fun hypot(a: Float, b: Float) = sqrt(a * a + b * b)
 
     /** Matched-filter envelope at one lag: |<x[at..at+CHIRP_LEN), chirp_I + j chirp_Q>|. */
     private fun env(x: FloatArray, at: Int): Float {
@@ -340,5 +431,8 @@ class SonarEngine(
     companion object {
         private const val TAG = "SonarEngine"
         private const val SEARCH = 32
+        /** Lags (from the direct peak) covered by speaker cancellation: 252 ≈ 0.9 m / 3 ft. */
+        const val CANCEL_LEN = 252
+        private const val CALIBRATION_PINGS = 48   // ~2 s
     }
 }
