@@ -3,17 +3,48 @@ package com.murdock.murdock
 import com.murdock.murdock.EchoBrain.Companion.direct
 import com.murdock.murdock.EchoBrain.Companion.toFloats
 import com.murdock.murdock.SonarConfig.DEPTH_SIZE
+import android.util.Log
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
  * Camera "teacher": MiDaS v2.1 small (monocular relative depth) turns a camera frame
- * into the depth label the echo student learns from. Only used while the lights are on.
+ * into the depth label the echo student learns from, and the camera-assist picture.
+ *
+ * Runs on the GPU when the device supports it (typically 5-10x faster than CPU), so it works
+ * in parallel with the echo AI training on the CPU. Must be created and used on one thread.
  */
 class TeacherDepth(file: File) {
-    private val interpreter = Interpreter(file, Interpreter.Options().setNumThreads(4))
+    /** "gpu" or "cpu", and the last frame's inference time, for the UI. */
+    var backend = "cpu"; private set
+    var lastMs = 0L; private set
+
+    // Declared after backend: openInterpreter() sets it, and initializers run in order.
+    private var gpu: GpuDelegate? = null
+    private val interpreter: Interpreter = openInterpreter(file)
+
+    private fun openInterpreter(file: File): Interpreter {
+        try {
+            val compat = CompatibilityList()
+            if (compat.isDelegateSupportedOnThisDevice) {
+                val delegate = GpuDelegate(compat.bestOptionsForThisDevice)
+                val it = Interpreter(file, Interpreter.Options().addDelegate(delegate))
+                gpu = delegate
+                backend = "gpu"
+                return it
+            }
+        } catch (t: Throwable) {
+            // Some GPU drivers reject the model or crash on init; the CPU path always works.
+            Log.w("TeacherDepth", "GPU unavailable, using CPU: $t")
+            gpu?.close(); gpu = null
+        }
+        backend = "cpu"
+        return Interpreter(file, Interpreter.Options().setNumThreads(4))
+    }
 
     /** rgb: SIZE*SIZE*3 bytes, row-major, upright. Returns DEPTH_SIZE^2 nearness in [0, 1]. */
     fun run(rgb: ByteArray): FloatArray {
@@ -25,7 +56,9 @@ class TeacherDepth(file: File) {
             f.put(((rgb[i].toInt() and 0xff) - MEAN[c]) / STD[c])
         }
         val out = direct(SIZE * SIZE)
+        val t0 = System.nanoTime()
         interpreter.run(input, out)
+        lastMs = (System.nanoTime() - t0) / 1_000_000
         val inv = out.toFloats(SIZE * SIZE)
 
         // Box-downsample to the student's resolution, then robust min/max normalise
@@ -43,7 +76,10 @@ class TeacherDepth(file: File) {
         return small
     }
 
-    fun close() = interpreter.close()
+    fun close() {
+        interpreter.close()
+        gpu?.close()
+    }
 
     companion object {
         const val SIZE = 256

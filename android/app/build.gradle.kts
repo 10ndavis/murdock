@@ -52,4 +52,6 @@ flutter {
 dependencies {
     // LiteRT (formerly TensorFlow Lite): runs the echo student (incl. on-device training) and the MiDaS teacher.
     implementation("com.google.ai.edge.litert:litert:1.4.0")
+    // GPU delegate for the camera teacher (MiDaS); falls back to CPU where unsupported.
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.0")
 }

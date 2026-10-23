@@ -105,7 +105,10 @@ class SonarStatus {
         steps = m['steps'] as int? ?? 0,
         totalSamples = m['totalSamples'] as int? ?? 0,
         teacherReady = m['teacherReady'] as bool? ?? false,
-        samplesDir = m['samplesDir'] as String? ?? '';
+        samplesDir = m['samplesDir'] as String? ?? '',
+        pendingSteps = m['pendingSteps'] as int? ?? 0,
+        teacherBackend = m['teacherBackend'] as String? ?? '',
+        teacherMs = m['teacherMs'] as int? ?? 0;
 
   final bool stereo;
   final String source;
@@ -116,6 +119,24 @@ class SonarStatus {
   final int totalSamples;
   final bool teacherReady;
   final String samplesDir;
+
+  /// Training steps still owed to recent samples (0 = caught up).
+  final int pendingSteps;
+
+  /// Where the camera depth teacher runs ("gpu"/"cpu", empty until first use) and how long a frame takes.
+  final String teacherBackend;
+  final int teacherMs;
+}
+
+class TeachResult {
+  TeachResult(Map<Object?, Object?> m)
+      : depth = m['depth']! as Float32List,
+        ms = m['ms'] as int? ?? 0,
+        backend = m['backend'] as String? ?? '';
+
+  final Float32List depth;
+  final int ms;
+  final String backend;
 }
 
 /// Thin wrapper over the native sonar/model bridge in MainActivity.kt.
@@ -155,6 +176,7 @@ class SonarChannel {
 
   Future<void> setNumber(String name, double value) => _method.invokeMethod('setNumber', [name, value]);
 
+  Future<void> clearFlag(String name) => _method.invokeMethod('clearFlag', name);
   Future<void> setFlag(String name) => _method.invokeMethod('setFlag', name);
 
   Future<void> start() => _method.invokeMethod('start');
@@ -171,7 +193,8 @@ class SonarChannel {
   Future<SonarStatus> status() async =>
       SonarStatus((await _method.invokeMethod<Map<Object?, Object?>>('status'))!);
 
-  /// Sends an upright 256x256 RGB frame; returns the camera teacher's nearness map.
-  Future<Float32List> teach(Uint8List rgb) async =>
-      (await _method.invokeMethod<Float32List>('teach', rgb))!;
+  /// Sends an upright 256x256 RGB frame; returns the camera teacher's nearness map. With
+  /// [learn], the frame also becomes a training sample for the echo AI.
+  Future<TeachResult> teach(Uint8List rgb, {required bool learn}) async =>
+      TeachResult((await _method.invokeMethod<Map<Object?, Object?>>('teach', {'rgb': rgb, 'learn': learn}))!);
 }

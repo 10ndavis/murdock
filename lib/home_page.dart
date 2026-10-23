@@ -18,8 +18,17 @@ import 'ui/system_check.dart';
 
 enum Mode { see, radar, teach }
 
-/// Camera-labelled samples that count as "fully taught" for one room (~6 min at 4 fps).
-const int kTeachGoal = 1500;
+/// Camera-labelled samples that count as "fully taught" (learning continues past it).
+/// Simulated on BatVision: 600 samples get 23% lower error, 1500 only 25%.
+const int kTeachGoal = 600;
+
+/// Camera brightness (mean luma 0..255, before the low-light boost):
+/// below kAssistLuma the camera is ignored (sound only); the camera's share of the SEE
+/// picture ramps up to full at kAssistFullLuma; frames at or above kLearnLuma also train the
+/// echo AI (darker frames make the depth teacher guess, and bad labels would hurt).
+const double kAssistLuma = 12;
+const double kAssistFullLuma = 60;
+const double kLearnLuma = 30;
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -46,6 +55,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   SonarStats? _stats;
   bool _previewUntaught = false;
 
+  // Camera assist + continuous learning.
+  bool _assist = true;
+  double _cameraLuma = 0;
+  Float32List? _teacherMap;
+  DateTime _teacherAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _teacherMs = 0;
+  String _teacherBackend = '';
+  bool _lastFrameLearned = false;
+
   // Grip: live tilt from the motion sensor, and the average tilt while teaching (saved).
   double _tilt = kIdealTilt;
   double _roll = 0;
@@ -61,17 +79,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _subs.add(_sonar.frames.listen((f) => _signal = _signal * 0.9 + f.signal * 0.1));
     _subs.add(_sonar.brain.listen((b) {
       _samples = b.samples;
-      _vision.update(b.depth);
+      _vision.update(_fuse(b.depth));
     }));
     _subs.add(_sonar.pose.listen((p) => setState(() {
           _tilt = p.tilt;
           _roll = p.roll;
-          if (_teaching) {
-            _sessionTiltSum += p.tilt;
-            _sessionTiltN++;
-          }
+
         })));
     _sonar.getNumber('taughtTilt').then((t) => _taughtTilt = t);
+    _sonar.getFlag('assistOff').then((off) => setState(() => _assist = !off));
     _subs.add(_sonar.stats.listen((s) => setState(() {
           _stats = s;
           if (s.pingsPerSec == 0) _signal = 0;
@@ -93,6 +109,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     await _startSonar();
     final s = await _sonar.status();
+    if (mounted) setState(() => _status = s);
+    await _syncCamera();
     // Send new users to the place they need to start.
     if (s.totalSamples >= kTeachGoal ~/ 3 && mounted) setState(() => _mode = Mode.see);
   }
@@ -131,56 +149,118 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // The native side stops the speaker when the app is backgrounded; resume it here.
     if (state == AppLifecycleState.resumed) {
-      _startSonar();
+      _startSonar().then((_) => _syncCamera());
     } else if (state == AppLifecycleState.paused) {
-      _setTeaching(false);
+      _stopCamera();
     }
   }
 
   Future<void> _setMode(Mode m) async {
     if (m == _mode) return;
-    if (_mode == Mode.teach) await _setTeaching(false);
+    if (_mode == Mode.teach) _teaching = false;
     setState(() => _mode = m);
+    await _syncCamera();
   }
 
   Future<void> _setTeaching(bool on) async {
     if (on == _teaching) return;
-    if (on) {
+    setState(() => _teaching = on);
+    await _syncCamera();
+  }
+
+  Future<void> _setAssist(bool on) async {
+    setState(() => _assist = on);
+    on ? await _sonar.clearFlag('assistOff') : await _sonar.setFlag('assistOff');
+    await _syncCamera();
+  }
+
+  /// The camera runs while TEACH is teaching, and in SEE while camera assist is on.
+  bool get _wantCamera =>
+      (_status?.teacherReady ?? false) && ((_mode == Mode.teach && _teaching) || (_mode == Mode.see && _assist));
+
+  Future<void> _syncCamera() async {
+    if (!mounted) return;
+    if (_wantCamera && !_camera.running) {
       if (!await _sonar.requestPermission('camera')) {
-        _toast('Camera permission is needed to teach.');
+        _toast('Camera permission is needed for camera assist and learning.');
+        setState(() => _teaching = false);
         return;
       }
-      setState(() => _teaching = true);
       _sessionTiltSum = 0;
       _sessionTiltN = 0;
-      await _sonar.setTraining(true);
       try {
-        await _camera.start((Uint8List rgb) async => _teacherView.update(await _sonar.teach(rgb)));
+        await _camera.start(_onCameraFrame);
       } catch (e) {
         _toast('Camera failed: $e');
-        await _setTeaching(false);
-        return;
+        setState(() => _teaching = false);
       }
-    } else {
-      setState(() => _teaching = false);
-      await _sonar.setTraining(false);
-      await _camera.stop();
-      await _sonar.save();
-      // Remember how the phone was held while teaching, so SEE can ask for the same grip.
-      if (_sessionTiltN > 25) {
-        final session = _sessionTiltSum / _sessionTiltN;
-        final prev = _taughtTilt;
-        _taughtTilt = prev == null ? session : (prev + session) / 2;
-        await _sonar.setNumber('taughtTilt', _taughtTilt!);
-      }
+    } else if (!_wantCamera && _camera.running) {
+      await _stopCamera();
     }
     if (mounted) setState(() {});
+  }
+
+  Future<void> _stopCamera() async {
+    await _camera.stop();
+    _teacherMap = null;
+    await _sonar.save();
+    // Remember how the phone was held while learning, so SEE can ask for the same grip.
+    if (_sessionTiltN > 25) {
+      final session = _sessionTiltSum / _sessionTiltN;
+      final prev = _taughtTilt;
+      _taughtTilt = prev == null ? session : (prev + session) / 2;
+      await _sonar.setNumber('taughtTilt', _taughtTilt!);
+      _sessionTiltN = 0;
+    }
+  }
+
+  /// Every camera frame: if the camera can see, get its depth (for the picture) and, if
+  /// bright enough, turn it into a training sample. Continuous: learning never "finishes".
+  Future<void> _onCameraFrame(TeacherFrame f) async {
+    _cameraLuma = _cameraLuma * 0.7 + f.luma * 0.3;
+    if (f.luma < kAssistLuma) {
+      _lastFrameLearned = false;
+      return; // too dark to help; save the GPU/battery
+    }
+    final learn = f.luma >= kLearnLuma;
+    final r = await _sonar.teach(f.rgb, learn: learn);
+    _teacherMap = r.depth;
+    _teacherAt = DateTime.now();
+    _teacherMs = r.ms;
+    _teacherBackend = r.backend;
+    _lastFrameLearned = learn;
+    _teacherView.update(r.depth);
+    if (learn) {
+      _sessionTiltSum += _tilt;
+      _sessionTiltN++;
+    }
+  }
+
+  /// Camera's share of the SEE picture, 0 (sound only) .. 1 (camera only).
+  double get _assistWeight {
+    if (_mode != Mode.see || !_assist || _teacherMap == null) return 0;
+    if (DateTime.now().difference(_teacherAt).inMilliseconds > 1500) return 0;
+    return ((_cameraLuma - kAssistLuma) / (kAssistFullLuma - kAssistLuma)).clamp(0.0, 1.0);
+  }
+
+  /// SEE picture: camera depth where the camera can see, echo AI everywhere else.
+  Float32List _fuse(Float32List echo) {
+    final w = _assistWeight;
+    final t = _teacherMap;
+    if (w <= 0 || t == null) return echo;
+    final out = Float32List(echo.length);
+    for (var i = 0; i < echo.length; i++) {
+      out[i] = w * t[i] + (1 - w) * echo[i];
+    }
+    return out;
   }
 
   Future<void> _downloadTeacher() async {
     setState(() => _download = 0);
     try {
       await _sonar.downloadTeacher();
+      _status = await _sonar.status();
+      await _syncCamera();
     } catch (e) {
       _toast('Download failed: $e');
     }
@@ -320,31 +400,69 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Widget _seeScreen() {
     final untaught = _taught < 0.15;
-    if (untaught && !_previewUntaught) {
+    final teacherReady = _status?.teacherReady ?? false;
+    final assisting = _assist && teacherReady;
+    if (untaught && !assisting && !_previewUntaught) {
       return _centerCard(
         'The echo AI comes pre-trained on the BatVision dataset (about 11,000 real echo recordings paired with depth '
         'photos), so it knows what rooms typically look like. It hasn\'t learned YOUR rooms yet, so '
         'expect a generic room shape that only loosely follows what\'s really there.\n\n'
-        'For a picture that follows your surroundings, use TEACH in a lit room for a few minutes.',
+        'Turn on camera assist (or use TEACH): wherever the camera can see, it sharpens the picture and '
+        'the echo AI keeps learning.',
         top: ScanSweep(palette: _palette, size: 110),
         action: Column(children: [
-          GlowButton(label: 'TEACH NOW', icon: Icons.school_outlined, palette: _palette, filled: true,
-              onTap: () => _setMode(Mode.teach)),
+          GlowButton(
+            label: teacherReady ? 'TURN ON CAMERA ASSIST' : 'SET UP CAMERA (TEACH)',
+            icon: Icons.videocam_outlined,
+            palette: _palette,
+            filled: true,
+            onTap: () => teacherReady ? _setAssist(true) : _setMode(Mode.teach),
+          ),
           const SizedBox(height: 10),
           TextButton(
             onPressed: () => setState(() => _previewUntaught = true),
-            child: Text('PREVIEW ANYWAY', style: Hud.label(_palette.accent, size: 11)),
+            child: Text('PREVIEW SOUND ONLY', style: Hud.label(_palette.accent, size: 11)),
           ),
         ]),
       );
     }
+    final w = _assistWeight;
+    final String title, body;
+    if (!assisting) {
+      title = untaught ? 'SEE · SOUND ONLY (NOT TAUGHT YET)' : 'SEE · SOUND ONLY';
+      body = untaught
+          ? 'Generic BatVision head start. Camera assist makes it follow your room.'
+          : 'Brighter = closer. Move the phone slowly.';
+    } else if (_cameraLuma < kAssistLuma) {
+      title = 'SEE · SOUND ONLY · TOO DARK FOR CAMERA';
+      body = 'The picture comes from echoes alone. Brighter = closer.';
+    } else {
+      title = 'SEE · CAMERA ASSIST ${(w * 100).round()}%${_lastFrameLearned ? ' · LEARNING' : ''}';
+      body = _lastFrameLearned
+          ? 'Camera + sound. Every frame also teaches the echo AI for when it gets dark.'
+          : 'Dim: camera helps the picture but is too noisy to learn from.';
+    }
     return Stack(children: [
       Positioned.fill(child: VisionView(renderer: _vision, palette: _palette, placeholder: 'LISTENING…')),
-      _hint(untaught ? 'SEE · PREVIEW (NOT TAUGHT YET)' : 'SEE · SOUND-ONLY VISION',
-          untaught
-              ? 'Generic BatVision head start: a typical room shape. TEACH makes it follow your room.'
-              : 'Lights off. Brighter = closer. Move the phone slowly.'),
-      Positioned(left: 16, right: 16, bottom: 104, child: _grip(checkTaught: true)),
+      _hint(title, body),
+      Positioned(
+        left: 16,
+        right: 16,
+        bottom: 104,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Align(
+            alignment: Alignment.centerRight,
+            child: teacherReady
+                ? TextButton.icon(
+                    onPressed: () => _setAssist(!_assist),
+                    icon: Icon(_assist ? Icons.videocam : Icons.videocam_off_outlined, color: _palette.accent, size: 18),
+                    label: Text(_assist ? 'CAMERA ASSIST ON' : 'CAMERA ASSIST OFF', style: Hud.label(_palette.accent, size: 10)),
+                  )
+                : const SizedBox(),
+          ),
+          _grip(checkTaught: true),
+        ]),
+      ),
     ]);
   }
 
@@ -480,12 +598,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const SizedBox(height: 6),
                 Text(
                   _teaching
-                      ? 'Walk slowly. Point at walls, doors, furniture, people. Keep the lights on.'
+                      ? (_cameraLuma < kLearnLuma
+                          ? 'Too dark to learn from. Turn a light on, or keep going in SEE with camera assist.'
+                          : 'Walk slowly. Point at walls, doors, furniture, people.')
                       : taught >= 1
-                          ? 'Turn the lights off and open SEE. Teach again in each new room.'
-                          : '1  Lights on\n2  Press START\n3  Walk slowly around the room until 100%',
+                          ? 'Ready for the dark. It keeps learning in SEE whenever the camera can see, '
+                              'so it only gets better.'
+                          : '1  Lights on\n2  Press START\n3  Walk slowly around the room',
                   style: Hud.body.copyWith(fontSize: 12.5),
                 ),
+                if (_teaching && _teacherBackend.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'CAMERA AI ON ${_teacherBackend.toUpperCase()} · $_teacherMs MS/FRAME'
+                    '${(_status?.pendingSteps ?? 0) > 0 ? ' · ${_status!.pendingSteps} STEPS QUEUED' : ''}',
+                    style: Hud.label(Hud.dim, size: 8.5),
+                  ),
+                ],
               ]),
             ),
           ]),

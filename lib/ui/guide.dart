@@ -48,19 +48,23 @@ const _steps = [
       'Echoes alone don\'t say what things look like, so Murdock has to learn your rooms.\n\n'
           'In TEACH, the camera shows an AI what the room looks like while the sonar listens. '
           'The echo AI learns to match the two. Everything stays on your phone.\n\n'
-          'Lights ON. Walk slowly around the room for 5–10 minutes, pointing the phone at walls, '
-          'doorways, furniture and people. Fill the ring to 100%.'),
+          'Lights ON. Walk slowly around the room for a few minutes, pointing the phone at walls, '
+          'doorways, furniture and people, until the ring hits 100%. It keeps learning after that: '
+          'the more it sees, the better it gets.'),
   _Step(Icons.visibility, 'STEP 3 · SEE', 'See in the dark',
-      'Turn the lights off and open SEE. The picture now comes from sound only.\n\n'
+      'SEE blends two sources. Wherever the camera can still see (even dim light), its depth AI '
+          'sharpens the picture, and every usable frame also teaches the echo AI. As it gets darker, '
+          'the picture shifts to sound only. The banner shows the mix (CAMERA ASSIST %).\n\n'
           'Brighter means closer. Outlines are edges of things. The pulse sweeping outward is each sonar ping.\n\n'
-          'Hold the phone up like a camera and move it slowly.'),
+          'Turn CAMERA ASSIST off for pure sound or to save battery.'),
   _Step(Icons.info_outline, 'BE REALISTIC', 'What to expect',
       'Distance is the strong part: echoes measure it to within about 2 inches, out to roughly 18 ft.\n\n'
           'Shapes are blurry, and left/right is rough. A phone has only a couple of microphones, '
           'so the AI fills in detail from what it learned in your rooms.\n\n'
           'Out of the box, the AI is pre-trained on BatVision (real echo recordings with depth photos), '
-          'so it knows what rooms typically look like, but not yours. It works best in rooms you taught '
-          'it; a new room needs a new TEACH session.'),
+          'so it knows what rooms typically look like, but not yours. It works best in rooms it has learned. '
+          'In total darkness, expect blurry outlines even after lots of learning: two microphones '
+          'can only hear so much.'),
 ];
 
 class _GuidePageState extends State<GuidePage> {

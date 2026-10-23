@@ -77,6 +77,7 @@ Map<String, Object> _stats({bool broken = false}) => {
 void _mockNative({required int samples, bool broken = false, double tilt = 18}) {
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(_method, (call) async => switch (call.method) {
+        // Guide already seen; camera assist off (no camera in a headless test).
         'getFlag' => true,
         'requestPermission' => true,
         'teacherReady' => true,

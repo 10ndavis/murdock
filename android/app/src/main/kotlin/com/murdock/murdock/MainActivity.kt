@@ -43,10 +43,10 @@ class MainActivity : FlutterActivity() {
     private var brain: EchoBrain? = null
     private var teacher: TeacherDepth? = null
     @Volatile private var latestStack: FloatArray? = null
-    @Volatile private var training = false
     @Volatile private var brainState = "loading"
 
     private val prefs by lazy { getSharedPreferences("murdock", MODE_PRIVATE) }
+    private val samplesDir by lazy { File(getExternalFilesDir(null), "samples/v2") } // v2: echo_features input
     private val teacherFile by lazy { File(filesDir, "models/midas_v21_small.tflite") }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -57,6 +57,7 @@ class MainActivity : FlutterActivity() {
             override fun onCancel(arguments: Any?) { sink = null }
         })
         MethodChannel(messenger, "murdock/sonar").setMethodCallHandler(::onCall)
+        startTrainer()
         submit(brainThread, "load model") {
             try {
                 brain = loadBrain()
@@ -72,7 +73,7 @@ class MainActivity : FlutterActivity() {
         val key = FlutterInjector.instance().flutterLoader().getLookupKeyForAsset("assets/models/echo_student.tflite")
         val bytes = assets.open(key).use { it.readBytes() }
         val buf = ByteBuffer.allocateDirect(bytes.size).put(bytes)
-        return EchoBrain(buf, File(filesDir, "brain/head.weights"), File(getExternalFilesDir(null), "samples"))
+        return EchoBrain(buf, File(filesDir, "brain/head.weights"), samplesDir)
     }
 
     private fun onCall(call: MethodCall, result: MethodChannel.Result) {
@@ -99,17 +100,25 @@ class MainActivity : FlutterActivity() {
                     "totalSamples" to (b?.totalSamples ?: 0),
                     "loss" to (b?.lastLoss?.toDouble() ?: Double.NaN),
                     "teacherReady" to teacherFile.exists(),
-                    "samplesDir" to File(getExternalFilesDir(null), "samples").path,
+                    "samplesDir" to samplesDir.path,
+                    "pendingSteps" to (b?.pendingSteps ?: 0),
+                    "teacherBackend" to (teacher?.backend ?: ""),
+                    "teacherMs" to (teacher?.lastMs ?: 0L).toInt(),
                 ))
             }
             "requestPermission" -> requestPermission(call.arguments as String, result)
-            "setTraining" -> { training = call.arguments as Boolean; result.success(null) }
+            // Kept for older Dart code: training is continuous now, driven by new samples.
+            "setTraining" -> result.success(null)
             "teacherReady" -> result.success(teacherFile.exists())
             "getFlag" -> result.success(prefs.getBoolean(call.arguments as String, false))
             "getNumber" -> result.success(prefs.getFloat(call.arguments as String, Float.NaN).toDouble())
             "setNumber" -> {
                 val (key, value) = call.arguments as List<*>
                 prefs.edit().putFloat(key as String, (value as Number).toFloat()).apply()
+                result.success(null)
+            }
+            "clearFlag" -> {
+                prefs.edit().remove(call.arguments as String).apply()
                 result.success(null)
             }
             "setFlag" -> {
@@ -121,7 +130,10 @@ class MainActivity : FlutterActivity() {
                 TeacherDepth.download(teacherFile) { p -> emit(mapOf("type" to "download", "progress" to p.toDouble())) }
                 reply(result, true)
             }
-            "teach" -> teach(call.arguments as ByteArray, result)
+            "teach" -> {
+                val args = call.arguments as Map<*, *>
+                teach(args["rgb"] as ByteArray, args["learn"] as Boolean, result)
+            }
             "save" -> submit(brainThread, "save", result) { brain?.save(); reply(result, null) }
             "reset" -> submit(brainThread, "reset", result) { brain?.reset(); reply(result, null) }
             else -> result.notImplemented()
@@ -152,19 +164,40 @@ class MainActivity : FlutterActivity() {
             grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)
     }
 
-    /** Camera frame in -> teacher depth label, paired with the echoes heard at that moment. */
-    private fun teach(rgb: ByteArray, result: MethodChannel.Result) {
+    /**
+     * Camera frame in -> camera depth (for the camera-assist picture). With [learn], the depth
+     * also becomes a training label, paired with the echoes heard at that moment; the
+     * continuous trainer then spends the steps that sample earned.
+     * Teacher (GPU when available) and trainer (CPU) run on separate threads in parallel.
+     */
+    private fun teach(rgb: ByteArray, learn: Boolean, result: MethodChannel.Result) {
         val stack = latestStack
         if (stack == null) { result.error("sonar", "sonar not running", null); return }
         submit(teacherThread, "teacher", result) {
             val t = teacher ?: TeacherDepth(teacherFile).also { teacher = it }
             val depth = t.run(rgb)
-            submit(brainThread, "training") {
-                val b = brain ?: return@submit
-                b.addSample(stack, depth)
-                b.train(TRAIN_STEPS_PER_SAMPLE)
-            }
-            reply(result, depth)
+            if (learn) submit(brainThread, "training") { brain?.addSample(stack, depth) }
+            reply(result, mapOf("depth" to depth, "ms" to t.lastMs.toInt(), "backend" to t.backend))
+        }
+    }
+
+    // ── Continuous trainer ──────────────────────────────────────────────────────────────
+    // Spends the brain's step budget in ~30 ms bursts on the brain thread, leaving gaps so
+    // the live echo inference (also on that thread) stays smooth.
+    @Volatile private var trainerOn = false
+
+    private fun startTrainer() {
+        if (trainerOn) return
+        trainerOn = true
+        trainerTick()
+    }
+
+    private fun trainerTick() {
+        if (!trainerOn) return
+        submit(brainThread, "training") {
+            val steps = brain?.trainFor(TRAIN_BURST_MS) ?: 0
+            // Busy -> come back soon; idle (no budget) -> check again in a while.
+            main.postDelayed(::trainerTick, if (steps > 0) 5L else 250L)
         }
     }
 
@@ -178,8 +211,6 @@ class MainActivity : FlutterActivity() {
             try {
                 val b = brain ?: return@submit
                 val depth = b.infer(stack)
-                // Keep learning from the replay buffer between camera frames.
-                if (training) b.train(1)
                 emit(mapOf(
                     "type" to "brain",
                     "depth" to depth,
@@ -266,6 +297,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        trainerOn = false
         sonar?.stop()
         submit(brainThread, "close") { brain?.close() }
         submit(teacherThread, "close") { teacher?.close() }
@@ -275,7 +307,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val TAG = "Murdock"
-        private const val TRAIN_STEPS_PER_SAMPLE = 4
+        private const val TRAIN_BURST_MS = 30L
         private const val PERMISSION_REQUEST_BASE = 4100
     }
 }

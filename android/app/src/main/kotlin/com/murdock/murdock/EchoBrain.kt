@@ -33,8 +33,14 @@ class EchoBrain(
     var lastLoss = Float.NaN; private set
     val sampleCount get() = replay.size
 
+    @Volatile private var stepBudget = 0f
+
     // Declared after the counters: open() restores them, and Kotlin runs initializers in order.
     private var interpreter = open()
+
+    init {
+        loadRecentSamples()
+    }
     var recordToDisk = true
 
     private val metaFile get() = File(weightsFile.path + ".meta")
@@ -74,6 +80,7 @@ class EchoBrain(
         if (replay.size >= MAX_REPLAY) replay.removeAt(Random.nextInt(replay.size))
         replay.add(stack to depth)
         totalSamples++
+        stepBudget = minOf(stepBudget + STEPS_PER_SAMPLE, MAX_BUDGET)
         if (recordToDisk) {
             val out = sampleOut ?: FileOutputStream(
                 File(samplesDir.apply { mkdirs() }, "session_${System.currentTimeMillis()}.mdk")
@@ -82,6 +89,54 @@ class EchoBrain(
             bb.asFloatBuffer().put(stack).put(depth)
             out.write(bb.array())
         }
+    }
+
+    /**
+     * Continuous learning: each new camera-labelled sample earns STEPS_PER_SAMPLE training
+     * steps, spent here in short bursts. So the AI learns as fast as new data arrives, but
+     * doesn't keep grinding old data with nothing new (that only memorises it).
+     * Returns the steps taken.
+     */
+    fun trainFor(maxMillis: Long): Int {
+        if (replay.size < BATCH || stepBudget < 1f) return 0
+        val end = System.nanoTime() + maxMillis * 1_000_000
+        var n = 0
+        while (stepBudget >= 1f && System.nanoTime() < end) {
+            train(1)
+            stepBudget -= 1f
+            n++
+        }
+        return n
+    }
+
+    /** Steps still owed to recently added samples. */
+    val pendingSteps get() = stepBudget.toInt()
+
+    /** Reload the most recent samples from disk so learning continues across restarts. */
+    private fun loadRecentSamples() {
+        val files = samplesDir.listFiles { f -> f.name.endsWith(".mdk") }?.sortedByDescending { it.lastModified() } ?: return
+        val recordBytes = (STACK_FLOATS + DEPTH_FLOATS) * 4
+        val bb = ByteBuffer.allocate(recordBytes).order(ByteOrder.LITTLE_ENDIAN)
+        for (f in files) {
+            if (replay.size >= MAX_REPLAY) break
+            try {
+                java.io.DataInputStream(f.inputStream().buffered(1 shl 16)).use { inp ->
+                    while (replay.size < MAX_REPLAY) {
+                        bb.clear()
+                        inp.readFully(bb.array())
+                        val fb = bb.asFloatBuffer()
+                        val e = FloatArray(STACK_FLOATS).also { fb.get(it) }
+                        val d = FloatArray(DEPTH_FLOATS).also { fb.get(it) }
+                        replay.add(e to d)
+                    }
+                }
+            } catch (_: java.io.EOFException) {
+                // end of this file (or a partial last record); move to the next one
+            } catch (e: Exception) {
+                Log.w(TAG, "skip ${f.name}: $e")
+            }
+        }
+        Log.i(TAG, "reloaded ${replay.size} samples for replay")
     }
 
     /** A few SGD steps on random replay batches. Returns the mean loss (NaN if no data yet). */
@@ -142,13 +197,16 @@ class EchoBrain(
         target.runSignature(inputs, mapOf("ok" to direct(1)), "set_weights")
     }
 
-    /** Forget on-device training: back to the weights shipped in the asset. */
+    /** Forget on-device learning, including the recorded samples it would otherwise reload. */
     fun reset() {
         weightsFile.delete()
         metaFile.delete()
         interpreter.close()
         interpreter = open()
         replay.clear()
+        stepBudget = 0f
+        sampleOut?.close(); sampleOut = null
+        samplesDir.listFiles { f -> f.name.endsWith(".mdk") }?.forEach { it.delete() }
         trainedSteps = 0
         totalSamples = 0
         lastLoss = Float.NaN
@@ -165,7 +223,11 @@ class EchoBrain(
     companion object {
         private const val TAG = "EchoBrain"
         const val BATCH = 8           // fixed by the exported train signature
-        private const val MAX_REPLAY = 3000
+        private const val MAX_REPLAY = 2000           // ~40 MB in memory
+        // Simulated on BatVision (ml/simulate_teach.py, 12k steps): 600 samples give 23% lower
+        // error, 1500 give 25%; so ~20 steps per new sample captures most of the gain quickly.
+        const val STEPS_PER_SAMPLE = 20f
+        private const val MAX_BUDGET = 20000f
 
         fun direct(floats: Int): ByteBuffer =
             ByteBuffer.allocateDirect(floats * 4).order(ByteOrder.nativeOrder())

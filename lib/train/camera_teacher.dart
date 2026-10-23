@@ -4,10 +4,21 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 
-/// Streams the back camera and hands out upright, centre-cropped 256x256 RGB
-/// frames for the native MiDaS teacher, at most [maxFps] times a second.
+/// One camera frame for the teacher: upright 256x256 RGB plus how bright the scene was.
+class TeacherFrame {
+  const TeacherFrame(this.rgb, this.luma);
+
+  final Uint8List rgb;
+
+  /// Mean brightness 0..255 *before* the low-light boost (how much the camera really sees).
+  final double luma;
+}
+
+/// Streams the back camera and hands out upright, centre-cropped 256x256 RGB frames for
+/// the native MiDaS teacher. Frames are taken as fast as the teacher keeps up (one in
+/// flight), capped at [maxFps].
 class CameraTeacher {
-  CameraTeacher({this.maxFps = 4});
+  CameraTeacher({this.maxFps = 12});
 
   static const int side = 256;
   final double maxFps;
@@ -16,7 +27,10 @@ class CameraTeacher {
   bool _busy = false;
   DateTime _last = DateTime.fromMillisecondsSinceEpoch(0);
 
-  Future<void> start(Future<void> Function(Uint8List rgb) onFrame) async {
+  bool get running => controller != null;
+
+  Future<void> start(Future<void> Function(TeacherFrame frame) onFrame) async {
+    if (controller != null) return;
     final cams = await availableCameras();
     final back = cams.firstWhere((c) => c.lensDirection == CameraLensDirection.back, orElse: () => cams.first);
     final c = CameraController(back, ResolutionPreset.low,
@@ -46,8 +60,9 @@ class CameraTeacher {
     await c.dispose();
   }
 
-  /// YUV420 -> upright RGB, centre-cropped square, nearest-neighbour resampled.
-  static Uint8List toRgb(CameraImage img, int rotation) {
+  /// YUV420 -> upright RGB, centre-cropped square, nearest-neighbour resampled, with a
+  /// contrast stretch in dim light so the depth teacher still has something to work with.
+  static TeacherFrame toRgb(CameraImage img, int rotation) {
     final w = img.width, h = img.height;
     final yP = img.planes[0], uP = img.planes[1], vP = img.planes[2];
     final uPixel = uP.bytesPerPixel ?? 1, vPixel = vP.bytesPerPixel ?? 1;
@@ -56,6 +71,7 @@ class CameraTeacher {
     final crop = math.min(upW, upH);
     final ox = (upW - crop) ~/ 2, oy = (upH - crop) ~/ 2;
     final out = Uint8List(side * side * 3);
+    final hist = List<int>.filled(256, 0);
     var o = 0;
     for (var y = 0; y < side; y++) {
       final uy = oy + y * crop ~/ side;
@@ -78,6 +94,7 @@ class CameraTeacher {
             sy = uy;
         }
         final yy = yP.bytes[sy * yP.bytesPerRow + sx];
+        hist[yy]++;
         final u = uP.bytes[(sy >> 1) * uP.bytesPerRow + (sx >> 1) * uPixel] - 128;
         final v = vP.bytes[(sy >> 1) * vP.bytesPerRow + (sx >> 1) * vPixel] - 128;
         out[o++] = (yy + 1.402 * v).round().clamp(0, 255);
@@ -85,6 +102,36 @@ class CameraTeacher {
         out[o++] = (yy + 1.772 * u).round().clamp(0, 255);
       }
     }
-    return out;
+    // Mean and 2nd/98th percentile brightness.
+    var sum = 0, acc = 0, lo = 0, hi = 255;
+    const n = side * side;
+    for (var v = 0; v < 256; v++) {
+      sum += v * hist[v];
+    }
+    for (var v = 0; v < 256; v++) {
+      acc += hist[v];
+      if (acc >= n * 0.02) {
+        lo = v;
+        break;
+      }
+    }
+    acc = 0;
+    for (var v = 255; v >= 0; v--) {
+      acc += hist[v];
+      if (acc >= n * 0.02) {
+        hi = v;
+        break;
+      }
+    }
+    final mean = sum / n;
+    // Dim scene: stretch the used brightness range to full scale (noise rises too, which is
+    // why very dark frames aren't used for learning; see home_page.dart).
+    if (mean < 90 && hi - lo > 8) {
+      final g = 255 / (hi - lo);
+      for (var i = 0; i < out.length; i++) {
+        out[i] = ((out[i] - lo) * g).round().clamp(0, 255);
+      }
+    }
+    return TeacherFrame(out, mean);
   }
 }
