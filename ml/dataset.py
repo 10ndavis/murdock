@@ -18,7 +18,8 @@ RECORD_FLOATS = ECHO_FLOATS + DEPTH_FLOATS
 
 
 def load_dir(path: str):
-    files = sorted(glob.glob(os.path.join(path, "**", "*.mdk"), recursive=True))
+    """Loads one .mdk file, or every .mdk file under a folder."""
+    files = [path] if path.endswith(".mdk") else sorted(glob.glob(os.path.join(path, "**", "*.mdk"), recursive=True))
     if not files:
         raise SystemExit(f"no .mdk files under {path}")
     chunks = []
