@@ -28,13 +28,15 @@ const _steps = [
           'It bounces off walls, furniture and people, and your microphones hear the echoes.\n\n'
           'Most adults can\'t hear it. Kids and pets might.\n\n'
           'Turn your MEDIA VOLUME UP, and don\'t cover the speaker or mics.'),
-  _Step(Icons.back_hand_outlined, 'HOLD IT LIKE THIS', 'Grip matters',
-      'At these high pitches the speaker sends sound out in a narrow beam, mostly out of the BOTTOM edge.\n\n'
-          '•  Portrait, like taking a photo, with the back camera facing the room.\n'
+  _Step(Icons.back_hand_outlined, 'HOLD IT LIKE THIS', 'Upside down, like reading it',
+      'At these high pitches the speaker sends sound out in a narrow beam from the phone\'s BOTTOM edge. '
+          'So Murdock runs upside down: the speaker ends up on top.\n\n'
+          '•  Turn the phone upside down (the screen follows). Back camera faces the room.\n'
+          '•  Hold it like you\'re reading it: top tilted away from you about 35°. The screen faces you '
+          'and the speaker aims ahead.\n'
           '•  Arm partly out, about a foot from your chest.\n'
-          '•  Tilt the top toward you about 15–20°, so the bottom speaker points ahead instead of at the floor.\n'
-          '•  Hold it by the sides. Fingers off the bottom edge (speaker and mic).\n'
-          '•  Use the SAME grip when you teach and when you see.\n\n'
+          '•  Hold it by the sides. Fingers off the top edge (speaker and mic).\n'
+          '•  Keep the same grip all the time; the AI learns your grip too.\n\n'
           'The GRIP strip on screen checks all of this live and tells you what to fix.'),
   _Step(Icons.radar, 'STEP 1 · RADAR', 'Check your phone can hear',
       'Open RADAR. This is the raw sonar, with no AI involved.\n\n'

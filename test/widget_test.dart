@@ -28,30 +28,21 @@ void main() {
     img.dispose();
   });
 
-  group('grip advice', () {
+  group('grip advice (upside-down layout: positive tilt = top away from you)', () {
     GripLevel level(double tilt, {double roll = 0, double db = double.nan, double? taught, bool see = false}) =>
         GripAdvice.of(tilt: tilt, roll: roll, directDb: db, taughtTilt: taught, checkTaught: see).level;
+    String title(double t) => GripAdvice.of(tilt: t, roll: 0, directDb: double.nan).title;
 
-    test('ideal tilt is OK', () => expect(level(18), GripLevel.ok));
-    test('bolt upright: tilt the top toward you', () => expect(level(0), GripLevel.warn));
-    test('top leaning away: speaker aims at you and the floor', () => expect(level(-20), GripLevel.warn));
-    test('lying flat (screen up) is bad', () => expect(level(-70), GripLevel.bad));
-    test('tilted far toward you is bad', () => expect(level(70), GripLevel.bad));
-    test('landscape is bad', () => expect(level(18, roll: 80), GripLevel.bad));
-    test('covered speaker beats everything', () => expect(level(18, db: -12), GripLevel.bad));
-    test('a few dB quieter is fine', () => expect(level(18, db: -3), GripLevel.ok));
-    test('SEE warns when the grip differs from teaching',
-        () => expect(level(25, taught: 5, see: true), GripLevel.warn));
-    test('TEACH ignores the taught grip', () => expect(level(25, taught: 5), GripLevel.ok));
-  });
-
-  test('grip messages point the right way', () {
-    String title(double t) =>
-        GripAdvice.of(tilt: t, roll: 0, directDb: double.nan).title;
-    expect(title(0), 'TILT THE TOP TOWARD YOU A LITTLE'); // upright: needs top toward you
-    expect(title(-20), 'TILT THE TOP TOWARD YOU'); // leaning away: needs top toward you
-    expect(title(40), 'TILT THE TOP BACK A LITTLE'); // too far toward you
-    expect(title(18), 'GRIP OK');
+    test('reading angle is OK', () => expect(level(35), GripLevel.ok));
+    test('bolt upright: tilt the top away a little', () => expect(title(5), 'TILT THE TOP AWAY A LITTLE'));
+    test('top toward you: speaker aims at you', () => expect(title(-20), 'TOP LEANING TOWARD YOU'));
+    test('nearly flat: raise the top', () => expect(title(60), 'RAISE THE TOP A LITTLE'));
+    test('flat is bad', () => expect(level(85), GripLevel.bad));
+    test('landscape is bad', () => expect(level(35, roll: 80), GripLevel.bad));
+    test('covered speaker beats everything', () => expect(level(35, db: -12), GripLevel.bad));
+    test('a few dB quieter is fine', () => expect(level(35, db: -3), GripLevel.ok));
+    test('SEE warns when the grip differs from learning', () => expect(level(45, taught: 25, see: true), GripLevel.warn));
+    test('without that check the same grip is fine', () => expect(level(45, taught: 25), GripLevel.ok));
   });
 
   testWidgets('invalid AI output never breaks the renderer', (tester) async {

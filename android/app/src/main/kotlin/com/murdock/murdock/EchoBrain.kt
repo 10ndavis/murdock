@@ -35,8 +35,11 @@ class EchoBrain(
 
     @Volatile private var stepBudget = 0f
 
-    // Declared after the counters: open() restores them, and Kotlin runs initializers in order.
-    private var interpreter = open()
+    // Created in the init block at the END of the class, never in a property initializer:
+    // open() reads modelId (a lazy delegate) and the counters, and Kotlin runs property
+    // initializers in textual order -- touching a later-declared delegate from an earlier
+    // initializer crashed startup with "getValue() on a null object reference".
+    private lateinit var interpreter: Interpreter
 
 
     var recordToDisk = true
@@ -302,6 +305,7 @@ class EchoBrain(
     // Last in the class on purpose: Kotlin runs property initializers and init blocks in
     // textual order, and these use fields declared above (good, trainEcho, ...).
     init {
+        interpreter = open()
         snapshot()
         loadRecentSamples()
     }

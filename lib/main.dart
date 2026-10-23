@@ -5,7 +5,9 @@ import 'home_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  // Upside down on purpose: the speaker (normally the bottom edge) ends up on top, so a
+  // comfortable viewing angle aims it away from you. See ui/grip.dart.
+  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitDown]);
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MurdockApp());
 }

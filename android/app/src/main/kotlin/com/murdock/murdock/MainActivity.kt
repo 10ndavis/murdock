@@ -267,11 +267,14 @@ class MainActivity : FlutterActivity() {
     private fun reply(result: MethodChannel.Result, value: Any?) = main.post { result.success(value) }
 
     // ── Grip / tilt, for the GRIP indicator ─────────────────────────────────────────────
-    // Gravity in device coordinates -> tilt and roll, sent to Dart at most 5x a second.
-    //   tilt: 0 = upright portrait; POSITIVE = top tilted toward the user (screen turning
-    //         toward the floor, bottom-edge speaker aiming forward); -90 = flat, screen up.
-    //   roll: sideways lean; about ±90 in landscape.
-    // (At rest the sensor reads +g along the axis pointing up: upright gives +y, screen-up +z.)
+    // The app runs upside down (reversePortrait) so the bottom-edge speaker is at the TOP and
+    // a comfortable viewing angle aims it away from the user.
+    // Gravity in device coordinates -> tilt and roll *as the user sees the screen*:
+    //   tilt: 0 = upright; POSITIVE = displayed top (the speaker end) tilted AWAY from the
+    //         user, screen turning up toward their face; 90 = flat, screen up.
+    //   roll: sideways lean; about ±90 when held landscape.
+    // At rest the sensor reads +g along the axis pointing up. Upside down, "up on screen" is
+    // the device's -y axis, so upright gives gy = -g; screen-up gives +gz.
     private var lastPose = 0L
     private val poseListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
@@ -279,8 +282,8 @@ class MainActivity : FlutterActivity() {
             if (now - lastPose < 200) return
             lastPose = now
             val (gx, gy, gz) = e.values
-            val tilt = Math.toDegrees(kotlin.math.atan2(-gz.toDouble(), gy.toDouble()))
-            val roll = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), kotlin.math.hypot(gy.toDouble(), gz.toDouble())))
+            val tilt = Math.toDegrees(kotlin.math.atan2(gz.toDouble(), -gy.toDouble()))
+            val roll = Math.toDegrees(kotlin.math.atan2(-gx.toDouble(), kotlin.math.hypot(gy.toDouble(), gz.toDouble())))
             emit(mapOf("type" to "pose", "tilt" to tilt, "roll" to roll))
         }
 

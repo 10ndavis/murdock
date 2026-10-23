@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
 
 /// One camera frame for the teacher: upright 256x256 RGB plus how bright the scene was.
 class TeacherFrame {
@@ -36,6 +36,8 @@ class CameraTeacher {
     final c = CameraController(back, ResolutionPreset.low,
         enableAudio: false, imageFormatGroup: ImageFormatGroup.yuv420);
     await c.initialize();
+    // The app runs upside down (portraitDown); keep the preview and frames upright for that.
+    await c.lockCaptureOrientation(DeviceOrientation.portraitDown).catchError((Object _) {});
     controller = c;
     await c.startImageStream((img) async {
       final now = DateTime.now();
@@ -43,7 +45,8 @@ class CameraTeacher {
       _busy = true;
       _last = now;
       try {
-        await onFrame(toRgb(img, back.sensorOrientation));
+        // +180: the phone is held upside down, so the sensor image is rotated a further half turn.
+        await onFrame(toRgb(img, (back.sensorOrientation + 180) % 360));
       } catch (_) {
         // A dropped label is harmless; the next frame will try again.
       } finally {

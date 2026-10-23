@@ -50,7 +50,7 @@ class SystemCheck extends StatelessWidget {
     rows.add(s.pingsPerSec >= 15
         ? _Row('PINGS', '${s.pingsPerSec}/s', _Level.ok)
         : _Row('PINGS', '${s.pingsPerSec}/s', s.pingsPerSec == 0 ? _Level.bad : _Level.warn,
-            'The app can\'t lock onto its own chirp. Turn the volume up and don\'t cover the bottom of the phone.'));
+            'The app can\'t lock onto its own chirp. Turn the volume up and don\'t cover the top edge (the speaker, since the app runs upside down).'));
     final pct = (signal * 100).round();
     rows.add(signal > 0.3
         ? _Row('ECHO CLARITY', '$pct%', _Level.ok)
