@@ -14,7 +14,8 @@ CHIRP_F0 = 17500.0
 CHIRP_F1 = 21500.0
 CHIRP_LEN = 240            # 5 ms
 POOL = RANGE_SAMPLES // RANGE_BINS
-LOG_FLOOR = 1e-4           # -80 dB relative to the direct path maps to 0
+LOG_FLOOR = 1e-4           # -80 dB relative to the reference maps to 0
+ECHO_ZONE_BINS = 4         # first ~7 in: the speaker's own sound lives here; masked to 0
 
 
 def chirp_iq():
@@ -34,30 +35,38 @@ def envelope(x: np.ndarray) -> np.ndarray:
     return np.sqrt(i * i + q * q)
 
 
-def profile(env: np.ndarray, direct: int) -> np.ndarray:
-    """Envelope -> RANGE_BINS log-scaled features starting at the direct-path peak."""
-    seg = env[direct:direct + RANGE_SAMPLES]
-    if len(seg) < RANGE_SAMPLES:
-        seg = np.pad(seg, (0, RANGE_SAMPLES - len(seg)))
-    ref = max(float(env[direct]), 1e-9)
-    pooled = seg.reshape(RANGE_BINS, POOL).max(axis=1) / ref
-    return np.clip((np.log10(pooled + LOG_FLOOR) + 4.0) / 4.0, 0.0, 1.0).astype(np.float32)
+def echo_features(envs, start: int) -> np.ndarray:
+    """THE model input for one ping: [RANGE_BINS, CHANNELS] in [0, 1].
+
+    envs: per-mic matched-filter envelopes with the speaker's own sound removed (the phone
+    cancels it; in BatVision it is negligible in-band). start: lag of the emission/direct
+    path. Bins inside ECHO_ZONE_BINS are masked, and both mics share one reference -- the
+    strongest echo beyond the zone -- so the strongest echo reads 1 and the left/right level
+    difference (a direction cue) survives. Mirrors SonarEngine.kt.
+    """
+    pooled = []
+    for env in envs:
+        seg = env[start:start + RANGE_SAMPLES]
+        if len(seg) < RANGE_SAMPLES:
+            seg = np.pad(seg, (0, RANGE_SAMPLES - len(seg)))
+        pooled.append(seg.reshape(RANGE_BINS, POOL).max(axis=1))
+    pooled = np.stack(pooled, axis=-1)
+    ref = max(float(pooled[ECHO_ZONE_BINS:].max()), 1e-9)
+    v = np.clip((np.log10(pooled / ref + LOG_FLOOR) + 4.0) / 4.0, 0.0, 1.0)
+    v[:ECHO_ZONE_BINS] = 0.0
+    return v.astype(np.float32)
 
 
 def ping_features(stereo: np.ndarray, search: int = 600) -> np.ndarray:
-    """stereo: [n, C] float recording that starts at (or shortly before) a chirp.
-
-    Returns [RANGE_BINS, CHANNELS]. The direct path is the strongest peak in the
-    first `search` lags of the first channel; both channels share that alignment so
-    the inter-mic delay (a left/right cue) is preserved.
-    """
+    """Model features from a raw recording that starts at (or shortly before) a chirp,
+    aligned at the strongest peak in the first `search` lags (fine when the direct sound
+    dominates, as on a phone; see stream_batvision.align_features when it doesn't)."""
     if stereo.ndim == 1:
         stereo = stereo[:, None]
     if stereo.shape[1] < CHANNELS:
         stereo = np.repeat(stereo[:, :1], CHANNELS, axis=1)
     envs = [envelope(stereo[:, c]) for c in range(CHANNELS)]
-    direct = int(np.argmax(envs[0][:search]))
-    return np.stack([profile(e, direct) for e in envs], axis=-1)
+    return echo_features(envs, int(np.argmax(envs[0][:search])))
 
 
 def normalize_nearness(inv_depth: np.ndarray) -> np.ndarray:

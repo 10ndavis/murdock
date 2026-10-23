@@ -11,6 +11,7 @@ import android.media.MediaRecorder
 import android.util.Log
 import com.murdock.murdock.SonarConfig.CHANNELS
 import com.murdock.murdock.SonarConfig.CHIRP_LEN
+import com.murdock.murdock.SonarConfig.ECHO_ZONE_BINS
 import com.murdock.murdock.SonarConfig.LOG_FLOOR
 import com.murdock.murdock.SonarConfig.PING_PERIOD
 import com.murdock.murdock.SonarConfig.POOL
@@ -35,7 +36,7 @@ import kotlin.math.sqrt
  */
 class SonarEngine(
     private val context: Context,
-    /** profile: raw echoes (model input); clean: speaker sound cancelled (for display). */
+    /** profile/clean: display profiles with/without the speaker's sound; stack: model input. */
     private val onPing: (profile: FloatArray, clean: FloatArray, stack: FloatArray, directLevel: Float) -> Unit,
     private val onError: (String) -> Unit,
     private val onStats: (Map<String, Any>) -> Unit,
@@ -383,33 +384,44 @@ class SonarEngine(
             }
         }
 
-        val profile = history[historyHead]
-        val clean = FloatArray(PROFILE_FLOATS)
+        val raw = FloatArray(PROFILE_FLOATS)       // display: speaker sound included
+        val clean = FloatArray(PROFILE_FLOATS)     // display: speaker sound cancelled
+        val pooled = FloatArray(PROFILE_FLOATS)    // model: cancelled magnitudes, pooled
         val cancel = hasTemplate && calibratingLeft == 0
         var directLevel = 0f
         for (c in 0 until CHANNELS) {
             val ref = max(hypot(corrI[c][0], corrQ[c][0]), 1e-9f)
             if (c == 0) directLevel = ref
             for (b in 0 until RANGE_BINS) {
-                var raw = 0f
+                var r = 0f
                 var cleaned = 0f
                 for (k in 0 until POOL) {
                     val j = b * POOL + k
                     val i = corrI[c][j]; val q = corrQ[c][j]
-                    raw = max(raw, hypot(i, q))
+                    r = max(r, hypot(i, q))
                     cleaned = max(cleaned,
                         if (cancel && j < CANCEL_LEN) hypot(i - templateI[c][j], q - templateQ[c][j]) else hypot(i, q))
                 }
-                profile[b * CHANNELS + c] = logScale(raw / ref)
+                raw[b * CHANNELS + c] = logScale(r / ref)
                 clean[b * CHANNELS + c] = logScale(cleaned / ref)
+                pooled[b * CHANNELS + c] = cleaned
             }
+        }
+
+        // Model input (mirrors ml/features.py echo_features): speaker zone masked, both mics
+        // scaled by the strongest echo beyond it, so phone and BatVision data share one scale.
+        var echoRef = 1e-9f
+        for (i in ECHO_ZONE_BINS * CHANNELS until PROFILE_FLOATS) echoRef = max(echoRef, pooled[i])
+        val features = history[historyHead]
+        for (i in 0 until PROFILE_FLOATS) {
+            features[i] = if (i < ECHO_ZONE_BINS * CHANNELS) 0f else logScale(pooled[i] / echoRef)
         }
         historyHead = (historyHead + 1) % STACK
         val stack = FloatArray(STACK_FLOATS)
         for (t in 0 until STACK) {
             System.arraycopy(history[(historyHead + t) % STACK], 0, stack, t * PROFILE_FLOATS, PROFILE_FLOATS)
         }
-        onPing(profile.copyOf(), clean, stack, directLevel)
+        onPing(raw, clean, stack, directLevel)
     }
 
     private fun logScale(v: Float) = min(1f, max(0f, (log10(v + LOG_FLOOR) + 4f) / 4f))

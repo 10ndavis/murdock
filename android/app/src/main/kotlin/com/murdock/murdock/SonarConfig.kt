@@ -19,6 +19,7 @@ object SonarConfig {
     const val CHIRP_F1 = 21500.0
     const val CHIRP_LEN = 240           // 5 ms
     const val LOG_FLOOR = 1e-4f
+    const val ECHO_ZONE_BINS = 4        // first ~7 in of the model input: masked (speaker zone)
     const val CHIRP_AMPLITUDE = 0.6f
 
     const val PROFILE_FLOATS = RANGE_BINS * CHANNELS

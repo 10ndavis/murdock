@@ -9,10 +9,10 @@ train/val/test CSVs are used afterwards to pair them.
   python stream_batvision.py join  --out data/bv                     # -> data/bv/{train,val,test}.mdk
 
 Alignment: each recording must be lined up on the moment the chirp leaves the speaker. In
-the phone's 17.5-21.5 kHz band BatVision's direct sound is often weaker than a nearby echo,
-so "loudest peak" mis-aligns ~half of BV1. Instead, fetch keeps the first RAW_KEEP samples
-of every recording (48 kHz, float16), and join aligns every recording of a session (a BV1
-day or BV2 location) at that session's most common peak position.
+the phone's 17.5-21.5 kHz band BatVision's direct sound is weaker than nearby echoes, so
+"loudest peak" mis-aligns most recordings (measured: 25% correct on BV1, ~10% on BV2).
+fetch keeps the first RAW_KEEP samples of every recording (48 kHz, float16), and join
+aligns them at the dataset's emission point; see align_features.
 """
 
 import argparse
@@ -30,12 +30,11 @@ from scipy.io import wavfile
 from dataset import write
 from murdock_model import STACK
 from prepare_batvision import BATVISION_RATE, _resample, depth_to_nearness
-from features import envelope, profile
+from features import echo_features, envelope
 
 API = "https://entrepot.recherche.data.gouv.fr/api/access/datafile/"
 PART_IDS = [627779, 627781, 627782, 627790, 627791]   # Batvision_Dataset-{0..4}.tar.gz
 SEARCH = 2000
-LOCK = 12                  # samples either side of the session offset to look for the peak
 RAW_KEEP = 6000            # 125 ms at 48 kHz: covers the direct sound plus RANGE_SAMPLES
 
 
@@ -153,30 +152,33 @@ def _session(key):
 
 
 def align_features(audio):
-    """Echo features for every recording, aligned per session at its most common peak."""
-    peaks = {k: int(np.argmax(envelope(a[:, 0].astype(np.float32))[:SEARCH])) for k, a in audio.items()}
+    """Echo features for every recording, aligned at the moment the chirp was emitted.
+
+    BatVision recordings are hardware-synchronised (the full-band chirp peaks at the same
+    sample in every file), but in the phone's band the direct speaker->mic sound is weak and
+    the loudest peak is usually an echo. So the emission point is found per session as the
+    first rise of the *median* in-band envelope above the noise floor, and each dataset uses
+    the median of its sessions' rises (same rig, same timing; per-room values only differ
+    by what happens to be close to the robot).
+    """
+    envs = {k: [envelope(a[:, c].astype(np.float32)) for c in range(2)] for k, a in audio.items()}
     by_session = {}
-    for k, p in peaks.items():
-        by_session.setdefault(_session(k), []).append(p)
+    for k, e in envs.items():
+        by_session.setdefault(_session(k), []).append(e[0][:SEARCH])
+    rises = {}
+    for sess, es in sorted(by_session.items()):
+        m = np.median(es, axis=0)
+        noise = np.median(m[:250])
+        rises[sess] = int(np.argmax(m > 4 * noise))
     offsets = {}
-    for sess, ps in sorted(by_session.items()):
-        ps = np.array(ps)
-        mode = int(np.bincount(ps).argmax())
-        # Refine: median of the peaks that agree with the mode, to centre the jitter.
-        near = ps[np.abs(ps - mode) <= 12]
-        offsets[sess] = int(np.median(near))
-        print(f"  {sess:45s} n={len(ps):5d} offset={offsets[sess]:5d}  "
-              f"agree(±12)={len(near) / len(ps):.0%}")
-    feats = {}
-    for k, a in audio.items():
-        x = a.astype(np.float32)
-        envs = [envelope(x[:, c]) for c in range(2)]
-        # Lock onto the local peak near the session offset (absorbs a few samples of jitter,
-        # like the phone's per-ping re-lock), never onto a far-off echo.
-        lo = max(offsets[_session(k)] - LOCK, 0)
-        direct = lo + int(np.argmax(envs[0][lo:offsets[_session(k)] + LOCK + 1]))
-        feats[k] = np.stack([profile(e, direct) for e in envs], axis=-1)
-    return feats
+    for version in sorted({s.split("/")[0] for s in rises}):
+        zero = int(np.median([r for s, r in rises.items() if s.startswith(version)]))
+        print(f"  {version}: emission at sample {zero} (sessions: "
+              + ", ".join(f"{s.split('/')[1]}={r}" for s, r in rises.items() if s.startswith(version)) + ")")
+        for s in rises:
+            if s.startswith(version):
+                offsets[s] = zero
+    return {k: echo_features(e, offsets[_session(k)]) for k, e in envs.items()}
 
 
 def _load_all(out, kind):
