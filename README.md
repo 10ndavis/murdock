@@ -98,6 +98,11 @@ That on-device learning works on top of the pre-trained model: `ml/simulate_teac
 shipped `.tflite` on the phone's runtime (LiteRT 1.4.0) through a simulated 10-minute TEACH
 session (12,000 head-training steps on frames from a set of rooms) and cuts L1 error on
 held-out frames from the same rooms by 25% (0.188 → 0.142).
+
+On-device training is guarded: gradients are clipped (norm 1.0), the learning rate is an
+input to the `train` signature, and if a step or a prediction is ever invalid the app restores
+the last good weights (snapshotted every 500 steps) and halves the rate. Invalid weights are
+never saved, and saved weights that produce invalid output are discarded at startup.
 * **Teacher**: MiDaS v2.1 small, 256×256, downloaded at runtime. Depth Anything V2 Small is
   more accurate and could replace it later. I didn't find a verified TFLite build of it, but
   Qualcomm AI Hub and Arm's ExecuTorch guide both run it on Android.

@@ -32,8 +32,16 @@ class _VisionViewState extends State<VisionView> with SingleTickerProviderStateM
   Future<void> _tick(Duration elapsed) async {
     if (_rendering || !widget.renderer.hasMap) return;
     _rendering = true;
-    final img = await widget.renderer.render(elapsed.inMicroseconds / 1e6, widget.palette);
-    _rendering = false;
+    final ui.Image img;
+    try {
+      img = await widget.renderer.render(elapsed.inMicroseconds / 1e6, widget.palette);
+    } catch (e) {
+      // A failed frame must not freeze the view on its placeholder: skip it, try the next.
+      debugPrint('VisionView: frame failed: $e');
+      return;
+    } finally {
+      _rendering = false;
+    }
     if (!mounted) {
       img.dispose();
       return;

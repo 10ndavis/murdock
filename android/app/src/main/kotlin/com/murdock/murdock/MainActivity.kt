@@ -81,7 +81,10 @@ class MainActivity : FlutterActivity() {
             "start" -> {
                 if (sonar == null) {
                     sonar = SonarEngine(this, ::onPing, ::reportError) { stats ->
-                        emit(stats + ("type" to "stats") + ("brain" to brainState))
+                        // "ready", or e.g. "recovered 2× (learning rate 0.025)" after a rollback.
+                        val b = brain
+                        val state = if (b != null && brainState == "ready" && b.health != "ok") b.health else brainState
+                        emit(stats + ("type" to "stats") + ("brain" to state))
                     }
                 }
                 sonar!!.start()

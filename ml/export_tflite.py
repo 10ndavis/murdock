@@ -2,9 +2,9 @@
 
 Signatures (used by EchoBrain.kt):
   infer(echo[1,T,R,C])                 -> depth[1,32,32]
-  train(echo[B,T,R,C], depth[B,32,32]) -> loss[]     (updates the head only)
+  train(echo[B,T,R,C], depth[B,32,32], lr[]) -> loss[]   (updates the head only)
   get_weights(dummy[])                 -> w0..wN     (head weights, persist after training)
-  set_weights(w0..wN)                  -> ok[]       (restore on next launch)
+  set_weights(w0..wN)                  -> ok[]       (restore; also zeroes momentum)
 
 Only builtin LiteRT ops are allowed (no flex runtime on the phone), which is
 why the conv trunk is frozen on device; see murdock_model.py.
@@ -26,16 +26,23 @@ from murdock_model import INPUT_SHAPE, OUTPUT_SHAPE, build_student, depth_loss
 TRAIN_BATCH = 8
 
 
+MOMENTUM = 0.9
+CLIP_NORM = 1.0   # max gradient norm per step: one bad batch can't blow the weights up
+
+
 class TrainableStudent(tf.Module):
-    def __init__(self, model, trunk, head, lr: float):
+    """On-device training uses a hand-written momentum SGD instead of a Keras optimizer:
+    the learning rate is a signature input (the app lowers it if training ever goes
+    unstable) and gradients are clipped by global norm. Only builtin LiteRT ops."""
+
+    def __init__(self, model, trunk, head):
         super().__init__()
         self.model, self.trunk, self.head = model, trunk, head
-        self.opt = tf.keras.optimizers.SGD(learning_rate=lr, momentum=0.9)
-        # Create optimizer slots up front so they become resource variables in the export.
-        self.opt.build(self.head.trainable_variables)
+        self.momentum = [tf.Variable(tf.zeros(v.shape), trainable=False, name=f"mom{i}")
+                         for i, v in enumerate(self.head.trainable_variables)]
         # Keras 3 variables aren't tf.Module-trackable; track the backing tf.Variables
         # explicitly so the SavedModel (and hence the .tflite) carries their values.
-        self.tracked_vars = [v.value for v in model.variables + self.opt.variables]
+        self.tracked_vars = [v.value for v in model.variables]
 
     @tf.function(input_signature=[tf.TensorSpec([1, *INPUT_SHAPE], tf.float32, name="echo")])
     def infer(self, echo):
@@ -44,14 +51,20 @@ class TrainableStudent(tf.Module):
     @tf.function(input_signature=[
         tf.TensorSpec([TRAIN_BATCH, *INPUT_SHAPE], tf.float32, name="echo"),
         tf.TensorSpec([TRAIN_BATCH, *OUTPUT_SHAPE], tf.float32, name="depth"),
+        tf.TensorSpec([], tf.float32, name="lr"),
     ])
-    def train(self, echo, depth):
+    def train(self, echo, depth, lr):
         latent = self.trunk(echo, training=False)
+        weights = self.head.trainable_variables
         with tf.GradientTape() as tape:
             pred = self.head(latent, training=True)
             loss = depth_loss(depth, pred)
-        grads = tape.gradient(loss, self.head.trainable_variables)
-        self.opt.apply_gradients(zip(grads, self.head.trainable_variables))
+        grads = tape.gradient(loss, weights)
+        norm = tf.sqrt(tf.add_n([tf.reduce_sum(g * g) for g in grads]))
+        scale = tf.minimum(1.0, CLIP_NORM / (norm + 1e-6))
+        for v, m, g in zip(weights, self.momentum, grads):
+            m.assign(MOMENTUM * m + scale * g)
+            v.assign_sub(lr * m)
         return {"loss": loss}
 
     def _weights(self):
@@ -71,6 +84,8 @@ class TrainableStudent(tf.Module):
         def set_weights(*values):
             for v, value in zip(weights, values):
                 v.assign(value)
+            for m in self.momentum:   # stale momentum would undo a rollback
+                m.assign(tf.zeros_like(m))
             return {"ok": tf.constant(1.0)}
 
         return get_weights, set_weights
@@ -79,16 +94,13 @@ class TrainableStudent(tf.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", help="Keras weights from train.py")
-    # Head-only SGD on the phone. Measured on BatVision (simulated 10-min TEACH, 12k steps):
-    # lr 1e-3 barely moves (-1%), 0.1 cuts held-out L1 by 25% and stays stable.
-    ap.add_argument("--lr", type=float, default=0.1)
     ap.add_argument("--out", default="../assets/models/echo_student.tflite")
     args = ap.parse_args()
 
     model, trunk, head = build_student()
     if args.weights:
         model.load_weights(args.weights)
-    module = TrainableStudent(model, trunk, head, args.lr)
+    module = TrainableStudent(model, trunk, head)
     get_weights, set_weights = module.make_io_signatures()
 
     signatures = {

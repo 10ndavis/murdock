@@ -38,9 +38,7 @@ class EchoBrain(
     // Declared after the counters: open() restores them, and Kotlin runs initializers in order.
     private var interpreter = open()
 
-    init {
-        loadRecentSamples()
-    }
+
     var recordToDisk = true
 
     private val metaFile get() = File(weightsFile.path + ".meta")
@@ -60,6 +58,15 @@ class EchoBrain(
         if (weightsFile.exists() && sameModel) {
             try {
                 restore(it)
+                if (!outputIsFinite(it)) {
+                    // Saved learning is corrupt (e.g. training blew up in an older version):
+                    // start again from the shipped weights instead of drawing garbage forever.
+                    Log.w(TAG, "saved weights give invalid output; discarding them")
+                    it.close()
+                    weightsFile.delete(); metaFile.delete()
+                    modelBytes.rewind()
+                    return Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
+                }
                 trainedSteps = meta!![0].toInt(); totalSamples = meta[1].toInt()
             } catch (e: Exception) { Log.w(TAG, "restore failed: $e") }
         } else if (weightsFile.exists()) {
@@ -69,10 +76,66 @@ class EchoBrain(
         return it
     }
 
-    fun infer(stack: FloatArray): FloatArray {
+    private fun outputIsFinite(target: Interpreter): Boolean {
         val out = direct(DEPTH_FLOATS)
-        interpreter.runSignature(mapOf("echo" to direct(stack)), mapOf("depth" to out), "infer")
-        return out.toFloats(DEPTH_FLOATS)
+        target.runSignature(mapOf("echo" to direct(STACK_FLOATS)), mapOf("depth" to out), "infer")
+        return out.toFloats(DEPTH_FLOATS).all { it.isFinite() }
+    }
+
+    // ── Training safety ─────────────────────────────────────────────────────────────────
+    // The exported train step clips gradients, but if a step or a prediction ever comes out
+    // invalid anyway, roll back to the last good weights and halve the learning rate.
+    var lr = DEFAULT_LR; private set
+    var rollbacks = 0; private set
+    private var good: Map<String, ByteBuffer>? = null
+
+    /** Copy of the current head weights, or null if any value is invalid. */
+    private fun currentWeights(): Map<String, ByteBuffer>? {
+        val outputs = weightNames().associateWith {
+            direct(interpreter.getOutputTensorFromSignature(it, "get_weights").numBytes() / 4)
+        }
+        interpreter.runSignature(mapOf("dummy" to direct(1)), outputs, "get_weights")
+        for (buf in outputs.values) {
+            buf.rewind()
+            val fb = buf.asFloatBuffer()
+            for (i in 0 until fb.remaining()) if (!fb.get(i).isFinite()) return null
+        }
+        return outputs
+    }
+
+    private fun snapshot() {
+        currentWeights()?.let { good = it }
+    }
+
+    private fun rollback(reason: String) {
+        rollbacks++
+        lr = maxOf(lr * 0.5f, MIN_LR)
+        Log.w(TAG, "rollback #$rollbacks ($reason); lr -> $lr")
+        val g = good
+        if (g != null) {
+            g.values.forEach { it.rewind() }
+            interpreter.runSignature(g.mapKeys { (k, _) -> k }, mapOf("ok" to direct(1)), "set_weights")
+        } else {
+            interpreter.close()
+            weightsFile.delete(); metaFile.delete()
+            modelBytes.rewind()
+            interpreter = Interpreter(modelBytes, Interpreter.Options().setNumThreads(2))
+            snapshot()
+        }
+    }
+
+    /** "ok", or how often training had to be rolled back (shown in System Check). */
+    val health get() = if (rollbacks == 0) "ok" else "recovered $rollbacks× (learning rate ${"%.3f".format(lr)})"
+
+    fun infer(stack: FloatArray): FloatArray {
+        repeat(2) {
+            val out = direct(DEPTH_FLOATS)
+            interpreter.runSignature(mapOf("echo" to direct(stack)), mapOf("depth" to out), "infer")
+            val d = out.toFloats(DEPTH_FLOATS)
+            if (d.all { it.isFinite() }) return d
+            rollback("invalid prediction")
+        }
+        return FloatArray(DEPTH_FLOATS)
     }
 
     /** Store a (echo, camera depth) pair for replay training and the PC dataset. */
@@ -140,33 +203,46 @@ class EchoBrain(
     }
 
     /** A few SGD steps on random replay batches. Returns the mean loss (NaN if no data yet). */
+    // Reused across steps (allocating direct buffers 50+ times a second churns native memory).
+    private val trainEcho = direct(BATCH * STACK_FLOATS)
+    private val trainDepth = direct(BATCH * DEPTH_FLOATS)
+    private val trainLoss = direct(1)
+    private val trainLr = direct(1)
+
     fun train(steps: Int): Float {
         if (replay.size < BATCH) return Float.NaN
-        val echo = direct(BATCH * STACK_FLOATS)
-        val depth = direct(BATCH * DEPTH_FLOATS)
-        val loss = direct(1)
         var total = 0f
+        var done = 0
         repeat(steps) {
-            echo.clear(); depth.clear()
-            val ef = echo.asFloatBuffer(); val df = depth.asFloatBuffer()
+            trainEcho.clear(); trainDepth.clear()
+            val ef = trainEcho.asFloatBuffer(); val df = trainDepth.asFloatBuffer()
             repeat(BATCH) {
                 val (e, d) = replay[Random.nextInt(replay.size)]
                 ef.put(e); df.put(d)
             }
-            loss.clear()
-            interpreter.runSignature(mapOf("echo" to echo, "depth" to depth), mapOf("loss" to loss), "train")
-            total += loss.toFloats(1)[0]
+            trainLoss.clear()
+            trainLr.clear(); trainLr.asFloatBuffer().put(lr)
+            interpreter.runSignature(
+                mapOf("echo" to trainEcho, "depth" to trainDepth, "lr" to trainLr), mapOf("loss" to trainLoss), "train")
+            val l = trainLoss.toFloats(1)[0]
+            if (!l.isFinite() || l > MAX_SANE_LOSS) {
+                rollback("loss $l")
+                return Float.NaN
+            }
+            total += l
+            done++
             trainedSteps++
+            if (trainedSteps % SNAPSHOT_EVERY == 0) snapshot()
         }
-        lastLoss = total / steps
+        lastLoss = if (done > 0) total / done else Float.NaN
         return lastLoss
     }
 
     fun save() {
-        val outputs = weightNames().associateWith {
-            direct(interpreter.getOutputTensorFromSignature(it, "get_weights").numBytes() / 4)
+        val outputs = currentWeights() ?: run {
+            Log.w(TAG, "not saving: weights are invalid")
+            return
         }
-        interpreter.runSignature(mapOf("dummy" to direct(1)), outputs, "get_weights")
         weightsFile.parentFile?.mkdirs()
         val tmp = File(weightsFile.path + ".tmp")
         DataOutputStream(tmp.outputStream().buffered()).use { out ->
@@ -205,6 +281,9 @@ class EchoBrain(
         interpreter = open()
         replay.clear()
         stepBudget = 0f
+        lr = DEFAULT_LR
+        rollbacks = 0
+        snapshot()
         sampleOut?.close(); sampleOut = null
         samplesDir.listFiles { f -> f.name.endsWith(".mdk") }?.forEach { it.delete() }
         trainedSteps = 0
@@ -220,9 +299,22 @@ class EchoBrain(
     private fun weightNames() =
         interpreter.getSignatureOutputs("get_weights").sortedBy { it.removePrefix("w").toInt() }
 
+    // Last in the class on purpose: Kotlin runs property initializers and init blocks in
+    // textual order, and these use fields declared above (good, trainEcho, ...).
+    init {
+        snapshot()
+        loadRecentSamples()
+    }
+
     companion object {
         private const val TAG = "EchoBrain"
         const val BATCH = 8           // fixed by the exported train signature
+        // Simulated on BatVision with the clipped trainer: 0.1 -> 23% better, 0.5 -> 27% and
+        // still stable; 0.1 leaves headroom for noisier phone data.
+        private const val DEFAULT_LR = 0.1f
+        private const val MIN_LR = 0.005f
+        private const val MAX_SANE_LOSS = 5f      // L1 + edge loss on [0,1] maps stays well below 2
+        private const val SNAPSHOT_EVERY = 500
         private const val MAX_REPLAY = 2000           // ~40 MB in memory
         // Simulated on BatVision (ml/simulate_teach.py, 12k steps): 600 samples give 23% lower
         // error, 1500 give 25%; so ~20 steps per new sample captures most of the gain quickly.

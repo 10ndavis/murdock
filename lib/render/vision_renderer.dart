@@ -25,7 +25,9 @@ class VisionRenderer {
   /// Feed a new model output; smoothed over time because single pings are noisy.
   void update(Float32List depth) {
     for (var i = 0; i < _smooth.length; i++) {
-      _smooth[i] = _hasMap ? _smooth[i] * 0.6 + depth[i] * 0.4 : depth[i];
+      // Never let an invalid value in: one NaN would poison the smoothed map for good.
+      final d = depth[i].isFinite ? depth[i].clamp(0.0, 1.0) : 0.0;
+      _smooth[i] = _hasMap ? _smooth[i] * 0.6 + d * 0.4 : d;
     }
     _hasMap = true;
   }

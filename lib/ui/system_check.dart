@@ -65,7 +65,10 @@ class SystemCheck extends StatelessWidget {
     });
     rows.add(s.brain == 'ready'
         ? const _Row('ECHO AI', 'loaded', _Level.ok)
-        : _Row('ECHO AI', s.brain, s.brain == 'loading' ? _Level.warn : _Level.bad));
+        : s.brain.startsWith('recovered')
+            ? _Row('ECHO AI', s.brain, _Level.warn,
+                'Training became unstable and was rolled back automatically; it now learns more slowly.')
+            : _Row('ECHO AI', s.brain, s.brain == 'loading' ? _Level.warn : _Level.bad));
     return rows;
   }
 

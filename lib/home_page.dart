@@ -53,6 +53,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _samples = 0;
   SonarStats? _stats;
   String? _lastError;
+  DateTime? _lastBrainAt;
+  final DateTime _startedAt = DateTime.now();
 
   // Camera assist + continuous learning.
   bool _assist = true;
@@ -79,6 +81,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _subs.add(_sonar.frames.listen((f) => _signal = _signal * 0.9 + f.signal * 0.1));
     _subs.add(_sonar.brain.listen((b) {
       _samples = b.samples;
+      _lastBrainAt = DateTime.now();
       _vision.update(_fuse(b.depth));
     }));
     _subs.add(_sonar.pose.listen((p) => setState(() {
@@ -383,6 +386,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final teacherReady = status?.teacherReady ?? false;
     if (status != null && !teacherReady && !_skipDownload) return _downloadCard();
 
+    final stalled = _seeStalled;
+    if (stalled != null) return _stalledCard(stalled);
+
     final assisting = _assist && teacherReady;
     final level = _assistLevel;
     final untaught = _taught < 0.15;
@@ -448,6 +454,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     ]);
   }
+
+  /// Why SEE has nothing to draw, or null if it's fine. Never leave the user staring at
+  /// "LISTENING…": say which link of the chain is missing.
+  String? get _seeStalled {
+    final now = DateTime.now();
+    if (now.difference(_startedAt).inSeconds < 5) return null; // still starting up
+    final last = _lastBrainAt;
+    if (last != null && now.difference(last).inSeconds < 3) return null;
+    final st = _stats;
+    if (st == null || !st.running) return 'The sonar isn\'t running.';
+    if (st.pingsPerSec == 0) {
+      return 'No pings: the app can\'t hear its own chirp, so the echo AI has nothing to work with.';
+    }
+    if (st.brain == 'loading') return 'The echo AI is still loading…';
+    if (st.brain.startsWith('failed')) return 'The echo AI failed to start: ${st.brain}';
+    return 'Pings are arriving but the echo AI isn\'t producing pictures (state: ${st.brain}).';
+  }
+
+  Widget _stalledCard(String why) => Padding(
+        padding: EdgeInsets.fromLTRB(16, MediaQuery.paddingOf(context).top + 76, 16, 100),
+        child: SingleChildScrollView(
+          child: HudPanel(
+            palette: _palette,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text('NOTHING TO SHOW YET', style: Hud.label(_palette.accent, size: 11)),
+              const SizedBox(height: 6),
+              Text(why, style: Hud.body),
+              const SizedBox(height: 14),
+              _systemCheck(),
+            ]),
+          ),
+        ),
+      );
 
   Widget _chip(IconData icon, String label, VoidCallback onTap) => InkWell(
         onTap: onTap,

@@ -21,6 +21,6 @@ print('output finite:', np.isfinite(out).all(), 'range', round(float(out.min()),
 print('held-out L1 before on-device training:', round(l1(hold), 4))
 for step in range(int(sys.argv[3]) if len(sys.argv) > 3 else 300):
     b = rng.choice(teach, 8)
-    loss = train(echo=echo[b], depth=depth[b])['loss']
+    loss = train(echo=echo[b], depth=depth[b], lr=np.float32(0.1))['loss']
 print('train loss after N steps:', round(float(loss), 4))
 print('held-out L1 after on-device training: ', round(l1(hold), 4))

@@ -53,4 +53,14 @@ void main() {
     expect(title(40), 'TILT THE TOP BACK A LITTLE'); // too far toward you
     expect(title(18), 'GRIP OK');
   });
+
+  testWidgets('invalid AI output never breaks the renderer', (tester) async {
+    final r = VisionRenderer();
+    final bad = Float32List(kDepthSize * kDepthSize)..fillRange(0, 100, double.nan);
+    bad[200] = double.infinity;
+    r.update(bad);
+    final img = await tester.runAsync(() => r.render(0.5, SightPalette.radar));
+    expect(img!.width, VisionRenderer.size);
+    img.dispose();
+  });
 }
