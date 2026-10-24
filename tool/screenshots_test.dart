@@ -81,20 +81,33 @@ Map<String, Object> _stats({bool broken = false, bool tuned = false}) => {
       'loudness': tuned ? 0.8 : 0.6,
       'clarityDb': broken ? double.nan : 14.0,
       'tuning': false,
+      'emitter': tuned ? 2 : 0,
+      'stereoOut': true,
+      'micChannels': 2,
+      'micA': 0,
+      'micB': 1,
+      'speakers': tuned ? 'separate' : 'untested',
     };
 
-/// AUTO-TUNE part-way through: three of five loudness levels measured.
+/// AUTO-TUNE on a two-speaker phone: part-way through the speaker stage, or done.
 Map<String, Object> _tuneEvent({required bool done}) => {
       'type': 'tune',
       'state': done ? 'done' : 'running',
       'phase': done ? 'calibrate' : 'measure',
-      'progress': done ? 1.0 : 0.52,
-      'levels': [0.3, 0.45, 0.6, 0.8, 1.0],
-      'clarity': done ? [9.0, 13.5, 15.2, 17.1, 16.8] : [9.0, 13.5, 15.2, double.nan, double.nan],
-      'clipped': [false, false, false, false, false],
+      'progress': done ? 1.0 : 0.71,
+      'levels': [0.3, 0.45, 0.6, 0.8, 1.0, 0.8, 0.8],
+      'labels': ['30%', '45%', '60%', '80%', '100%', 'SPK 1', 'SPK 2'],
+      'clarity': done
+          ? [9.0, 13.5, 15.2, 17.1, 16.8, 15.9, 19.4]
+          : [9.0, 13.5, 15.2, 17.1, 16.8, 15.9, double.nan],
+      'clipped': [false, false, false, false, false, false, false],
       'testing': 0.8,
+      'testingLabel': done ? '' : 'SPK 2',
       'best': done ? 0.8 : double.nan,
-      'bestDb': done ? 17.1 : double.nan,
+      'bestDb': done ? 19.4 : double.nan,
+      'bestLabel': done ? '80% · SPEAKER 2' : '',
+      'speakers': 'separate',
+      'micChannels': 2,
       'message': '',
     };
 

@@ -25,6 +25,27 @@ class SystemCheck extends StatelessWidget {
   final String? lastError;
   final SightPalette palette;
 
+  static const _speakerNames = ['both speakers', 'speaker 1 only', 'speaker 2 only'];
+
+  _Row _speakersRow(SonarStats s) {
+    final using = _speakerNames[s.emitter.clamp(0, 2)];
+    if (!s.stereoOut) return _Row('SPEAKERS', '$using · one sound channel only', _Level.ok);
+    return switch (s.speakers) {
+      'separate' => _Row('SPEAKERS', 'two, driven separately · using $using', _Level.ok),
+      'shared' => _Row('SPEAKERS', 'Android plays both as one · using $using', _Level.ok),
+      _ => _Row('SPEAKERS', '$using · not tested yet', _Level.warn,
+          'Run AUTO-TUNE on RADAR: it tests each speaker on its own and keeps the clearer one.'),
+    };
+  }
+
+  _Row _micsRow(SonarStats s) {
+    final n = s.micChannels;
+    if (n <= 2) {
+      return _Row('MIC CHANNELS', n == 2 ? '2 (the most Android allows this app here)' : '1', _Level.ok);
+    }
+    return _Row('MIC CHANNELS', '$n available · using ${s.micA + 1}+${s.micB + 1}', _Level.ok);
+  }
+
   List<_Row> _rows() {
     final s = stats;
     if (s == null) {
@@ -40,12 +61,14 @@ class SystemCheck extends StatelessWidget {
         : _Row('MEDIA VOLUME', '$vol%', vol == 0 ? _Level.bad : _Level.warn,
             'Press volume UP while Murdock is open. The chirp needs to be loud to echo.'));
     rows.add(_Row('CHIRP LOUDNESS', '${(s.loudness * 100).round()}%${s.tuning ? ' · auto-tuning…' : ''}', _Level.ok));
+    rows.add(_speakersRow(s));
     if (s.mic.startsWith('failed')) {
       rows.add(_Row('MICROPHONE', s.mic, _Level.bad, 'Check microphone permission in Android settings.'));
     } else {
       final heard = s.micDb > -85;
       rows.add(_Row('MICROPHONE', '${s.mic} · ${s.source}${s.stereo ? '' : ' (1 mic)'}',
           s.mic == 'listening' ? _Level.ok : _Level.warn));
+      rows.add(_micsRow(s));
       rows.add(_Row('MIC LEVEL', '${s.micDb.toStringAsFixed(0)} dB', heard ? _Level.ok : _Level.bad,
           heard ? null : 'The mic is returning silence. Another app may be recording, or the mic is blocked.'));
     }

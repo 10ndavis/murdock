@@ -773,10 +773,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         backgroundColor: const Color(0xFF0B0D14),
         title: Text('AUTO-TUNE', style: Hud.label(_palette.accent, size: 13)),
         content: const Text(
-          'Murdock tries 5 chirp loudness levels and keeps the one whose echo comes back clearest on '
-          'your phone. Then it relearns the speaker\'s own sound at that loudness.\n\n'
+          'Murdock tries 5 chirp loudness levels, then each of your speakers on its own and every pair '
+          'of microphones Android lets it use, and keeps whatever makes the echo clearest on your '
+          'phone. Then it relearns the speaker\'s own sound for that setup.\n\n'
           'Stand 4–6 ft from a flat wall and aim the top edge (the speaker) at it. Keep still for '
-          'about 10 seconds, with nothing else within 3 ft of the phone.',
+          'about 15 seconds, with nothing else within 3 ft of the phone.',
           style: Hud.body,
         ),
         actions: [

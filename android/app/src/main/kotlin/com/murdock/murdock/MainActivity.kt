@@ -212,8 +212,17 @@ class MainActivity : FlutterActivity() {
     /** Saved loudness, and AUTO-TUNE progress to Dart (a finished tune's loudness is saved). */
     private fun setUpSound(engine: SonarEngine) {
         engine.loudness = prefs.getFloat(LOUDNESS, SonarConfig.CHIRP_AMPLITUDE)
+        // Speaker and mic pair chosen by the last AUTO-TUNE (defaults: both speakers, mics 1+2).
+        engine.setSetup(prefs.getInt(EMITTER, SonarEngine.EMIT_BOTH), prefs.getInt(MIC_A, 0), prefs.getInt(MIC_B, 1))
+        engine.speakerLayout = prefs.getString(SPEAKERS, "untested") ?: "untested"
         engine.onTune = { event ->
-            if (event["state"] == "done") prefs.edit().putFloat(LOUDNESS, engine.loudness).apply()
+            if (event["state"] == "done") prefs.edit()
+                .putFloat(LOUDNESS, engine.loudness)
+                .putInt(EMITTER, engine.emitter)
+                .putInt(MIC_A, engine.micA)
+                .putInt(MIC_B, engine.micB)
+                .putString(SPEAKERS, engine.speakerLayout)
+                .apply()
             emit(event)
         }
     }
@@ -333,5 +342,9 @@ class MainActivity : FlutterActivity() {
         private const val TAG = "Murdock"
         private const val PERMISSION_REQUEST_BASE = 4100
         private const val LOUDNESS = "loudness"
+        private const val EMITTER = "emitter"
+        private const val MIC_A = "micA"
+        private const val MIC_B = "micB"
+        private const val SPEAKERS = "speakers"
     }
 }

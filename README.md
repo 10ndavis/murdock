@@ -34,11 +34,15 @@ sweeping the phone to build a synthetic aperture. Both are listed below.
 
 1. Turn the **media volume up**. Chirps at 17.5–21.5 kHz are near-inaudible to most adults,
    but children and pets may hear them. Don't hold the speaker against anyone's ear.
-   On RADAR, **AUTO-TUNE** (stand 4–6 ft from a wall, keep still ~10 s) tries five chirp
-   loudness levels and keeps the quietest one within 1 dB of the clearest echo, then relearns
-   the speaker filter at it. The **LOUDNESS** slider does the same by hand, with live ECHO
-   CLARITY in dB. Only loudness is adjustable: the echo AI was trained on one exact chirp
-   (17.5–21.5 kHz, 5 ms, ~23/s), so its pitch and timing stay fixed.
+   On RADAR, **AUTO-TUNE** (stand 4–6 ft from a wall, keep still ~15 s) tries five chirp
+   loudness levels and keeps the quietest one within 1 dB of the clearest echo. On phones with
+   two speakers it then plays from each speaker alone (stereo left/right): if the mics hear
+   them clearly differently (> 3 dB) they really are separate, and one is kept if its echo is
+   ≥ 1 dB clearer than both together. If Android gives the app more than two mic channels
+   (tried with a channel index mask; copies of one mic are rejected), every mic pair is tried
+   the same way. Then it relearns the speaker filter for that setup (one filter per setup).
+   The **LOUDNESS** slider sets loudness by hand, with live ECHO CLARITY in dB. The echo AI
+   still hears one chirp through two mics, as it was trained (17.5–21.5 kHz, 5 ms, ~23/s).
 2. **SCOPE**: raw sonar. The top half is an echogram (distance → across, time ↓). The bottom
    half is a radar fan. Static clutter is subtracted, so moving things light up. Walk toward a
    wall and watch the ring move in.

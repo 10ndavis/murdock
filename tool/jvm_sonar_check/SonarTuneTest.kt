@@ -172,5 +172,71 @@ fun main() {
     println("  clipping: ${events.last()["state"]} · ${events.last()["message"]}")
     check(events.last()["state"] == "failed" && (events.last()["message"] as String).contains("overloaded"), "clipping is caught")
 
+    // 7. Two speakers and three mics (stages 2 and 3).
+    setupTune(dir, separate = true)
+    setupTune(dir, separate = false)
+
     println("all sonar checks passed")
+}
+
+/**
+ * A phone with two speakers (left channel near mic 1, right near mic 2) and three mics. Both
+ * speakers together partly cancel each other's echo (they are a few inches apart); speaker 2
+ * alone gives the clearest echo, and mic 3 is the quietest mic. With [separate] false, Android
+ * mixes both channels into one speaker, so left-only and right-only sound alike.
+ */
+fun setupTune(root: File, separate: Boolean) {
+    val dir = File(root, "setup_$separate").apply { mkdirs() }
+    val events = ArrayList<Map<String, Any>>()
+    val engine = newEngine(dir, events)
+    for ((field, value) in listOf("stereoOut" to true, "micChannels" to 3)) {
+        SonarEngine::class.java.getDeclaredField(field).apply { isAccessible = true }.let {
+            if (value is Boolean) it.setBoolean(engine, value) else it.setInt(engine, value as Int)
+        }
+    }
+    val emit = SonarEngine::class.java.getDeclaredMethod("emitPing", Array<FloatArray>::class.java, Int::class.java)
+        .apply { isAccessible = true }
+    val rnd = Random(3)
+    val chirp = SonarConfig.chirpIQ[0]
+    val directGain = if (separate) arrayOf(floatArrayOf(0.5f, 0.1f, 0.3f), floatArrayOf(0.1f, 0.5f, 0.3f))
+    else arrayOf(floatArrayOf(0.3f, 0.3f, 0.3f), floatArrayOf(0.3f, 0.3f, 0.3f))
+    val echoGain = if (separate) floatArrayOf(0.003f, 0.006f) else floatArrayOf(0.0045f, 0.0045f)
+    val noise = floatArrayOf(0.0006f, 0.0006f, 0.0003f)
+    fun mic(m: Int, loud: Float, e: Int): FloatArray {
+        val x = FloatArray(N)
+        val speakers = when (e) { SonarEngine.EMIT_LEFT -> listOf(0); SonarEngine.EMIT_RIGHT -> listOf(1); else -> listOf(0, 1) }
+        // Both together: the second speaker's echo arrives out of phase and partly cancels.
+        val echo = if (speakers.size == 2) echoGain[0] - 0.8f * echoGain[1] else echoGain[speakers[0]]
+        for (n in 0 until SonarConfig.CHIRP_LEN) {
+            for (sp in speakers) x[DIRECT + n] += directGain[sp][m] * loud * chirp[n]
+            x[DIRECT + WALL_LAG + n] += abs(echo) * loud * chirp[n]
+        }
+        for (i in x.indices) x[i] += (rnd.nextFloat() * 2 - 1) * noise[m] * 1.73f
+        return x
+    }
+    // The speaker plays what the engine asked for a few pings ago (output latency).
+    val asked = ArrayDeque<Triple<Float, Int, Pair<Int, Int>>>()
+    fun run(pings: Int) = repeat(pings) {
+        asked.addLast(Triple(engine.loudness, engine.emitter, engine.micA to engine.micB))
+        val (loud, e, _) = if (asked.size > LATENCY_PINGS) asked.removeFirst() else asked.first()
+        // The mic pair switches immediately (it is just which channels are read).
+        emit.invoke(engine, arrayOf(mic(engine.micA, loud, e), mic(engine.micB, loud, e)), DIRECT)
+    }
+    engine.calibrate()
+    run(60)
+    engine.autoTune()
+    run(600)
+    val done = events.last()
+    println("  ${if (separate) "separate" else "shared"} speakers: ${done["labels"]} -> " +
+        "${(done["clarity"] as List<*>).map { "%.1f".format(it as Double) }}; picked ${done["bestLabel"]} (${done["speakers"]})")
+    check(done["state"] == "done", "setup tune finishes ($separate)")
+    if (separate) {
+        check(done["speakers"] == "separate", "two separate speakers are recognised")
+        check(engine.emitter == SonarEngine.EMIT_RIGHT, "keeps the clearer speaker alone")
+        check(engine.micA == 0 && engine.micB == 2 || engine.micA == 1 && engine.micB == 2, "keeps a pair with the quiet third mic")
+        check(File(dir, "speaker_template_e${engine.emitter}_m${engine.micA}${engine.micB}.bin").exists(), "filter saved for that setup")
+    } else {
+        check(done["speakers"] == "shared", "mixed-down speakers are recognised")
+        check(engine.emitter == SonarEngine.EMIT_BOTH, "keeps both speakers when they can't be separated")
+    }
 }

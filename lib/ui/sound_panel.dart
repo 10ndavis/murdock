@@ -10,7 +10,8 @@ String formatDb(double db) => db.isNaN ? '–' : '${db >= 0 ? '+' : ''}${db.toSt
 String _pct(double v) => '${(v * 100).round()}%';
 
 /// RADAR's sound controls: chirp LOUDNESS (live, with the echo clarity it gives) and
-/// AUTO-TUNE, which tries several loudness levels against a wall and keeps the clearest.
+/// AUTO-TUNE, which tries loudness levels, each speaker alone and every mic pair against a
+/// wall, and keeps the clearest.
 ///
 /// Only loudness is adjustable: the echo AI was trained on one exact chirp (17.5–21.5 kHz,
 /// 5 ms, 23 a second), so changing its pitch or timing would make what it learned stop
@@ -84,7 +85,7 @@ class SoundPanel extends StatelessWidget {
         ),
         if (t != null && t.state == 'done') ...[
           const SizedBox(height: 4),
-          Text('AUTO-TUNED · BEST ${_pct(t.best)} · CLARITY ${formatDb(t.bestDb)}',
+          Text('AUTO-TUNED · ${t.bestLabel.isNotEmpty ? t.bestLabel : 'BEST ${_pct(t.best)}'} · CLARITY ${formatDb(t.bestDb)}',
               style: Hud.label(Hud.text, size: 9)),
         ] else if (t != null && t.state == 'failed') ...[
           const SizedBox(height: 4),
@@ -95,8 +96,9 @@ class SoundPanel extends StatelessWidget {
   List<Widget> _running(TuneEvent t) {
     final step = t.clarity.where((c) => !c.isNaN).length;
     final what = switch (t.phase) {
-      'final_settle' || 'calibrate' => 'RELEARNING SPEAKER SOUND AT ${_pct(t.testing)}',
-      _ => 'TESTING ${_pct(t.testing)} · ${(step + 1).clamp(1, t.levels.length)}/${t.levels.length}',
+      'final_settle' || 'calibrate' => 'RELEARNING SPEAKER SOUND',
+      _ => 'TESTING ${t.testingLabel.isNotEmpty ? t.testingLabel : _pct(t.testing)} · '
+          '${(step + 1).clamp(1, t.levels.length)}/${t.levels.length}',
     };
     return [
       Row(children: [
@@ -148,7 +150,7 @@ class SoundPanel extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Text(
-              t.clarity[i].isNaN ? _pct(t.levels[i]) : formatDb(t.clarity[i]),
+              t.clarity[i].isNaN ? (i < t.labels.length ? t.labels[i] : _pct(t.levels[i])) : formatDb(t.clarity[i]),
               style: Hud.label(Hud.dim, size: 7.5),
             ),
           ]),

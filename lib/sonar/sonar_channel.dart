@@ -76,6 +76,12 @@ class SonarStats {
         loudness = (m['loudness'] as num?)?.toDouble() ?? kDefaultLoudness,
         clarityDb = (m['clarityDb'] as num?)?.toDouble() ?? double.nan,
         tuning = m['tuning'] as bool? ?? false,
+        emitter = m['emitter'] as int? ?? 0,
+        stereoOut = m['stereoOut'] as bool? ?? false,
+        micChannels = m['micChannels'] as int? ?? 0,
+        micA = m['micA'] as int? ?? 0,
+        micB = m['micB'] as int? ?? 1,
+        speakers = m['speakers'] as String? ?? 'untested',
         brain = m['brain'] as String? ?? '';
 
   final bool running;
@@ -105,6 +111,17 @@ class SonarStats {
   /// How far the strongest echo stands out of the noise, in dB (NaN until heard).
   final double clarityDb;
 
+  /// Which speaker chirps (0 both, 1 speaker 1 alone, 2 speaker 2 alone), whether the
+  /// output can address each speaker, and AUTO-TUNE's verdict: untested, separate, shared.
+  final int emitter;
+  final bool stereoOut;
+  final String speakers;
+
+  /// Mic channels Android delivers, and the pair the echo AI listens to (0-based).
+  final int micChannels;
+  final int micA;
+  final int micB;
+
   /// AUTO-TUNE is running.
   final bool tuning;
   final String brain;
@@ -124,6 +141,11 @@ class TuneEvent {
         levels = [for (final v in m['levels'] as List<Object?>? ?? const []) (v! as num).toDouble()],
         clarity = [for (final v in m['clarity'] as List<Object?>? ?? const []) (v as num?)?.toDouble() ?? double.nan],
         clipped = (m['clipped'] as List<Object?>? ?? const []).cast<bool>(),
+        labels = (m['labels'] as List<Object?>? ?? const []).cast<String>(),
+        testingLabel = m['testingLabel'] as String? ?? '',
+        bestLabel = m['bestLabel'] as String? ?? '',
+        speakers = m['speakers'] as String? ?? 'untested',
+        micChannels = m['micChannels'] as int? ?? 0,
         testing = (m['testing'] as num?)?.toDouble() ?? kDefaultLoudness,
         best = (m['best'] as num?)?.toDouble() ?? double.nan,
         bestDb = (m['bestDb'] as num?)?.toDouble() ?? double.nan,
@@ -140,6 +162,17 @@ class TuneEvent {
   final List<double> levels;
   final List<double> clarity;
   final List<bool> clipped;
+
+  /// What each tried setup was ("60%", "SPK 2", "MIC 1+3"), the one being tested now, and
+  /// the chosen setup in words.
+  final List<String> labels;
+  final String testingLabel;
+  final String bestLabel;
+
+  /// Whether the two speakers can be driven separately (separate / shared / untested), and
+  /// how many mic channels Android gave the app.
+  final String speakers;
+  final int micChannels;
 
   /// Loudness being played right now.
   final double testing;
